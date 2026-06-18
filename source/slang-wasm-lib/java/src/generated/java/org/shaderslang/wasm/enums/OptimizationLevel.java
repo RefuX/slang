@@ -8,7 +8,14 @@ package org.shaderslang.wasm.enums;
 
 /** Optimisation level. Mirrors {@code SlangOptimizationLevel} in slang.h. */
 public enum OptimizationLevel {
-    NONE(0), DEFAULT(1), HIGH(2), MAXIMAL(3);
+    /** Don't optimize at all. */
+    NONE(0),
+    /** Default optimization level: balance code quality and compilation time. */
+    DEFAULT(1),
+    /** Optimize aggressively. */
+    HIGH(2),
+    /** Include optimizations that may take a very long time, or may involve severe space-vs-speed tradeoffs */
+    MAXIMAL(3);
 
     public final int value;
 

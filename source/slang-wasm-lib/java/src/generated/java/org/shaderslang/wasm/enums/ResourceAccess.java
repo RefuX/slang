@@ -8,7 +8,15 @@ package org.shaderslang.wasm.enums;
 
 /** Resource access mode. Mirrors {@code SlangResourceAccess} in slang.h. */
 public enum ResourceAccess {
-    NONE(0), READ(1), READ_WRITE(2), RASTER_ORDERED(3), APPEND(4), CONSUME(5), WRITE(6), FEEDBACK(7), UNKNOWN(2147483647);
+    NONE(0),
+    READ(1),
+    READ_WRITE(2),
+    RASTER_ORDERED(3),
+    APPEND(4),
+    CONSUME(5),
+    WRITE(6),
+    FEEDBACK(7),
+    UNKNOWN(2147483647);
 
     public final int value;
 

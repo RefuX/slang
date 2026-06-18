@@ -8,7 +8,22 @@ package org.shaderslang.wasm.enums;
 
 /** Pipeline stage. Mirrors {@code SlangStage} in slang.h. */
 public enum Stage {
-    NONE(0), VERTEX(1), HULL(2), DOMAIN(3), GEOMETRY(4), FRAGMENT(5), COMPUTE(6), RAY_GENERATION(7), INTERSECTION(8), ANY_HIT(9), CLOSEST_HIT(10), MISS(11), CALLABLE(12), MESH(13), AMPLIFICATION(14), DISPATCH(15);
+    NONE(0),
+    VERTEX(1),
+    HULL(2),
+    DOMAIN(3),
+    GEOMETRY(4),
+    FRAGMENT(5),
+    COMPUTE(6),
+    RAY_GENERATION(7),
+    INTERSECTION(8),
+    ANY_HIT(9),
+    CLOSEST_HIT(10),
+    MISS(11),
+    CALLABLE(12),
+    MESH(13),
+    AMPLIFICATION(14),
+    DISPATCH(15);
 
     public final int value;
 

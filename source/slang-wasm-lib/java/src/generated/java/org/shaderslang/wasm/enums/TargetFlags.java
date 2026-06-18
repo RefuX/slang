@@ -8,7 +8,11 @@ package org.shaderslang.wasm.enums;
 
 /** Target flag bits. Mirrors {@code SlangTargetFlags} in slang.h. */
 public enum TargetFlags {
-    PARAMETER_BLOCKS_USE_REGISTER_SPACES(16), GENERATE_WHOLE_PROGRAM(256), DUMP_IR(512), GENERATE_SPIRV_DIRECTLY(1024);
+    PARAMETER_BLOCKS_USE_REGISTER_SPACES(16),
+    GENERATE_WHOLE_PROGRAM(256),
+    /** When set, will dump out the IR between intermediate compilation steps. */
+    DUMP_IR(512),
+    GENERATE_SPIRV_DIRECTLY(1024);
 
     public final int value;
 

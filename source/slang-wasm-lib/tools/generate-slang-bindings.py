@@ -158,16 +158,225 @@ def parse_enum_body(body: str) -> list:
     return results
 
 
-def extract_named_enum(content: str, c_name: str) -> Optional[list]:
-    """Find a named enum block (enum [class] c_name [: BaseType] { ... }) and parse it."""
+def _find_raw_enum_body(content: str, c_name: str) -> Optional[str]:
+    """Return the raw text between the braces of a named enum block, or None."""
     pattern = (
         rf"enum\s+(?:class\s+)?{re.escape(c_name)}"
         rf"\s*(?::[^{{]+?)?\s*\{{(.*?)\}}"
     )
     m = re.search(pattern, content, re.DOTALL)
-    if not m:
-        return None
-    return parse_enum_body(m.group(1))
+    return m.group(1) if m else None
+
+
+def extract_named_enum(content: str, c_name: str) -> Optional[list]:
+    """Find a named enum block (enum [class] c_name [: BaseType] { ... }) and parse it."""
+    body = _find_raw_enum_body(content, c_name)
+    return parse_enum_body(body) if body is not None else None
+
+
+def extract_member_comments(raw_body: str) -> dict:
+    """Extract inline or leading comments for enum member declarations.
+
+    Handles three inline styles:
+      MEMBER = v,  ///< text       (continuation lines also start with ///<)
+      MEMBER = v,  /**< text */    (closing */ may be on the next line)
+      MEMBER = v,  // text
+    And one leading style:
+      /* text */
+      MEMBER = v,
+
+    Returns {c_member_name: comment_text}.
+    """
+    comments: dict = {}
+    lines = raw_body.splitlines()
+    n = len(lines)
+    pending: Optional[str] = None  # leading block comment waiting for a member
+    i = 0
+
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+
+        if not stripped:
+            i += 1
+            continue
+
+        # ---- member declaration? ----
+        mem_m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)', stripped)
+        if not mem_m:
+            # Not a member line — check for a leading block comment.
+            if stripped.startswith('/*'):
+                # Read the whole comment (single- or multi-line).
+                text_parts: list = []
+                after_open = re.sub(r'^/\*+[!<]?\s*', '', stripped)
+                close_m = re.search(r'(.*?)\*/', after_open)
+                if close_m:
+                    t = close_m.group(1).strip()
+                    if t:
+                        text_parts.append(t)
+                else:
+                    if after_open.strip():
+                        text_parts.append(after_open.strip())
+                    i += 1
+                    while i < n:
+                        cont = lines[i].strip()
+                        end_m = re.search(r'(.*?)\*/', cont)
+                        if end_m:
+                            t = end_m.group(1).lstrip('*').strip()
+                            if t:
+                                text_parts.append(t)
+                            i += 1
+                            break
+                        else:
+                            t = cont.lstrip('*').strip()
+                            if t:
+                                text_parts.append(t)
+                            i += 1
+                pending = ' '.join(text_parts) if text_parts else None
+            else:
+                pending = None
+            i += 1
+            continue
+
+        # ---- member line — look for inline comment ----
+        member_name = mem_m.group(1)
+        comment: Optional[str] = None
+
+        triple_m = re.search(r'///<\s*(.*)', line)
+        block_m = re.search(r'/\*+<\s*(.*)', line)
+        plain_m = re.search(r'//(?![/<])\s*(.*)', line)
+
+        if triple_m:
+            text = triple_m.group(1).rstrip()
+            j = i + 1
+            while j < n:
+                cont_m = re.match(r'^\s*///<\s*(.*)', lines[j])
+                if cont_m:
+                    text += ' ' + cont_m.group(1).strip()
+                    j += 1
+                else:
+                    break
+            comment = text.strip()
+            i = j
+        elif block_m:
+            after = block_m.group(1)
+            end = re.search(r'(.*?)\*/', after)
+            if end:
+                comment = end.group(1).strip()
+                i += 1
+            else:
+                text = after.strip()
+                j = i + 1
+                while j < n:
+                    end_m = re.search(r'(.*?)\*/', lines[j])
+                    if end_m:
+                        part = end_m.group(1).lstrip('*').strip()
+                        if part:
+                            text += ' ' + part
+                        j += 1
+                        break
+                    else:
+                        part = lines[j].strip().lstrip('*').strip()
+                        if part:
+                            text += ' ' + part
+                        j += 1
+                comment = text.strip()
+                i = j
+        elif plain_m:
+            comment = plain_m.group(1).strip()
+            i += 1
+        elif pending:
+            comment = pending
+            i += 1
+        else:
+            i += 1
+
+        if comment:
+            comments[member_name] = comment
+        pending = None
+
+    return comments
+
+
+def extract_prefixed_member_comments(content: str, prefix: str) -> dict:
+    """Extract leading or inline block comments for prefix-matched enum members.
+
+    Used for anonymous enums such as SlangTargetFlags where the members are not
+    inside a named enum block and carry leading /* ... */ comments.
+    Returns {c_member_name: comment_text}.
+    """
+    comments: dict = {}
+    lines = content.splitlines()
+    n = len(lines)
+    pending: Optional[str] = None
+    i = 0
+
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+
+        if not stripped:
+            i += 1
+            continue
+
+        # Check for prefix-matched member
+        line_clean = re.sub(r"//.*", "", line).strip().rstrip(",")
+        mem_m = re.match(rf'^({re.escape(prefix)}[A-Za-z0-9_]+)\s*=', line_clean)
+        if mem_m:
+            member_name = mem_m.group(1)
+            # Prefer inline comment; fall back to pending leading comment.
+            triple_m = re.search(r'///<\s*(.*)', line)
+            block_inline = re.search(r'/\*+<\s*(.*)', line)
+            plain_m = re.search(r'//(?![/<])\s*(.*)', line)
+            if triple_m:
+                comments[member_name] = triple_m.group(1).strip()
+            elif block_inline:
+                after = block_inline.group(1)
+                end = re.search(r'(.*?)\*/', after)
+                if end:
+                    comments[member_name] = end.group(1).strip()
+            elif plain_m:
+                comments[member_name] = plain_m.group(1).strip()
+            elif pending:
+                comments[member_name] = pending
+            pending = None
+            i += 1
+            continue
+
+        # Leading block comment
+        if stripped.startswith('/*'):
+            text_parts: list = []
+            after_open = re.sub(r'^/\*+[!<]?\s*', '', stripped)
+            close_m = re.search(r'(.*?)\*/', after_open)
+            if close_m:
+                t = close_m.group(1).strip()
+                if t:
+                    text_parts.append(t)
+            else:
+                if after_open.strip():
+                    text_parts.append(after_open.strip())
+                i += 1
+                while i < n:
+                    end_m = re.search(r'(.*?)\*/', lines[i].strip())
+                    if end_m:
+                        t = end_m.group(1).lstrip('*').strip()
+                        if t:
+                            text_parts.append(t)
+                        i += 1
+                        break
+                    else:
+                        t = lines[i].strip().lstrip('*').strip()
+                        if t:
+                            text_parts.append(t)
+                        i += 1
+            pending = ' '.join(text_parts) if text_parts else None
+            i += 1
+            continue
+
+        pending = None
+        i += 1
+
+    return comments
 
 
 def extract_prefixed_members(content: str, prefix: str) -> list:
@@ -255,18 +464,34 @@ def generate_cpp(enum_data: dict) -> str:
       slang_wasm_enum_metadata_len() → byte length of the blob (excluding NUL)
 
     The JSON format is: {"EnumName":{"MemberName":intValue,...},...}
+    Each enum occupies one C string literal line so the file stays readable.
     """
-    # Build JSON: {JavaEnumName: {JavaMemberName: intValue}}
-    obj = {name: dict(members) for name, members in enum_data.items()}
-    blob = json.dumps(obj, separators=(",", ":"))
+    # Build one C string literal per enum so the file is readable.
+    # Each fragment represents the JSON substring: "EnumName":{"A":1,"B":2,...}
+    # json.dumps() of that substring escapes the inner quotes for us.
+    fragments = []
+    for name, members in enum_data.items():
+        inner = json.dumps(dict(members), separators=(",", ":"))
+        substring = f"{json.dumps(name)}:{inner}"   # e.g. "Target":{"SPIRV":6,...}
+        fragments.append(json.dumps(substring))      # C string literal with escapes
+
+    # Assemble: "{" <frag0> "," <frag1> ... "}"
+    string_lines = ['    "{"']
+    for i, frag in enumerate(fragments):
+        if i > 0:
+            string_lines.append('    ","')
+        string_lines.append(f"    {frag}")
+    string_lines.append('    "}";')
 
     lines = [
         _GENERATED_HEADER,
         "",
         "#include <cstdint>",
         "",
+        "// clang-format off",
         "static const char kEnumMetadataJson[] =",
-        f"    {json.dumps(blob)};",
+        *string_lines,
+        "// clang-format on",
         "",
         'extern "C" uint32_t slang_wasm_enum_metadata_ptr(void) {',
         "    return static_cast<uint32_t>(",
@@ -280,9 +505,19 @@ def generate_cpp(enum_data: dict) -> str:
     return "\n".join(lines)
 
 
-def generate_java_enum(spec: EnumSpec, java_members: list) -> str:
-    """Emit a Java enum source file for one Slang enum."""
-    members_str = ", ".join(f"{name}({value})" for name, value in java_members)
+def generate_java_enum(spec: EnumSpec, java_members: list, comments: dict) -> str:
+    """Emit a Java enum source file for one Slang enum.
+
+    comments maps each Java member name to a Javadoc string (may be empty).
+    """
+    # One constant per line; all but the last end with a comma, the last with a semicolon.
+    member_lines = []
+    for i, (name, value) in enumerate(java_members):
+        suffix = "," if i < len(java_members) - 1 else ";"
+        if name in comments:
+            member_lines.append(f"    /** {comments[name]} */")
+        member_lines.append(f"    {name}({value}){suffix}")
+
     lines = [
         _GENERATED_HEADER,
         "",
@@ -290,7 +525,7 @@ def generate_java_enum(spec: EnumSpec, java_members: list) -> str:
         "",
         f"/** {spec.javadoc} Mirrors {{@code {spec.c_name}}} in slang.h. */",
         f"public enum {spec.java_name} {{",
-        f"    {members_str};",
+        *member_lines,
         "",
         "    public final int value;",
         "",
@@ -349,15 +584,19 @@ def main():
 
     # Collect per-enum (java_name → [(java_member_name, int_value)]) data.
     enum_data: dict = {}
+    enum_comments: dict = {}  # java_name → {java_member_name: comment_text}
 
     for spec in ENUM_CONFIG:
         # Extract raw (C_member_name, int_value) pairs.
         if spec.prefix:
             # Anonymous or flag enum: locate members by their name prefix.
             raw = extract_prefixed_members(content, spec.prefix)
+            raw_comments = extract_prefixed_member_comments(content, spec.prefix)
         else:
             # Named enum (covers both "enum class" and "enum Name : Base").
             raw = extract_named_enum(content, spec.c_name)
+            raw_body = _find_raw_enum_body(content, spec.c_name)
+            raw_comments = extract_member_comments(raw_body) if raw_body else {}
 
         if raw is None:
             print(
@@ -377,6 +616,13 @@ def main():
         _, stripped = strip_prefix(c_names, spec.prefix)
         enum_data[spec.java_name] = list(zip(stripped, values))
 
+        # Map stripped Java names → comments, skipping members with no comment.
+        java_comments: dict = {}
+        for c_name, java_name in zip(c_names, stripped):
+            if c_name in raw_comments:
+                java_comments[java_name] = raw_comments[c_name]
+        enum_comments[spec.java_name] = java_comments
+
     # Write C++ output.
     cpp_dir = os.path.dirname(args.cpp_out)
     if cpp_dir:
@@ -390,7 +636,9 @@ def main():
     for spec in ENUM_CONFIG:
         if spec.java_name not in enum_data:
             continue
-        java_source = generate_java_enum(spec, enum_data[spec.java_name])
+        java_source = generate_java_enum(
+            spec, enum_data[spec.java_name], enum_comments.get(spec.java_name, {})
+        )
         out_path = os.path.join(args.java_out, f"{spec.java_name}.java")
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(java_source)

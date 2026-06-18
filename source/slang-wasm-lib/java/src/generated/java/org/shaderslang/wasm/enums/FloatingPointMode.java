@@ -8,7 +8,9 @@ package org.shaderslang.wasm.enums;
 
 /** Floating-point mode. Mirrors {@code SlangFloatingPointMode} in slang.h. */
 public enum FloatingPointMode {
-    DEFAULT(0), FAST(1), PRECISE(2);
+    DEFAULT(0),
+    FAST(1),
+    PRECISE(2);
 
     public final int value;
 

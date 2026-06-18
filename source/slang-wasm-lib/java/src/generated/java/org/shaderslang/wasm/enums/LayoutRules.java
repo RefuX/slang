@@ -8,7 +8,10 @@ package org.shaderslang.wasm.enums;
 
 /** Layout rule set. Mirrors {@code SlangLayoutRules} in slang.h. */
 public enum LayoutRules {
-    DEFAULT(0), METAL_ARGUMENT_BUFFER_TIER_2(1), DEFAULT_STRUCTURED_BUFFER(2), DEFAULT_CONSTANT_BUFFER(3);
+    DEFAULT(0),
+    METAL_ARGUMENT_BUFFER_TIER_2(1),
+    DEFAULT_STRUCTURED_BUFFER(2),
+    DEFAULT_CONSTANT_BUFFER(3);
 
     public final int value;
 

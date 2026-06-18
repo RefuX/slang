@@ -8,7 +8,9 @@ package org.shaderslang.wasm.enums;
 
 /** Matrix storage order. Mirrors {@code SlangMatrixLayoutMode} in slang.h. */
 public enum MatrixLayoutMode {
-    MODE_UNKNOWN(0), ROW_MAJOR(1), COLUMN_MAJOR(2);
+    MODE_UNKNOWN(0),
+    ROW_MAJOR(1),
+    COLUMN_MAJOR(2);
 
     public final int value;
 

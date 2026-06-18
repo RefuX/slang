@@ -8,7 +8,14 @@ package org.shaderslang.wasm.enums;
 
 /** Debug info verbosity. Mirrors {@code SlangDebugInfoLevel} in slang.h. */
 public enum DebugInfoLevel {
-    NONE(0), MINIMAL(1), STANDARD(2), MAXIMAL(3);
+    /** Don't emit debug information at all. */
+    NONE(0),
+    /** Emit as little debug information as possible, while still supporting stack trackers. */
+    MINIMAL(1),
+    /** Emit whatever is the standard level of debug information for each target. */
+    STANDARD(2),
+    /** Emit as much debug information as possible for each target. */
+    MAXIMAL(3);
 
     public final int value;
 
