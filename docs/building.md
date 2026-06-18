@@ -69,13 +69,26 @@ cmake --build --preset releaseWithDebugInfo # to build from the CLI, could also 
 There are also `*-dev` variants like `vs2022-dev` and `vs2026-dev` which turn on features to aid
 debugging. The `vs2022-dev` preset writes to `build/windows-vs2022-dev`.
 
-### WebAssembly build
+### WebAssembly builds
 
-In order to build WebAssembly build of Slang, Slang needs to be compiled with
-[Emscripten SDK](https://github.com/emscripten-core/emsdk). You can find more
-information about [Emscripten](https://emscripten.org/).
+Slang supports two independent WebAssembly build paths targeting different
+consumers:
 
-You need to clone the EMSDK repo. And you need to install and activate the latest.
+| | Emscripten (`slang-wasm`) | wasi-sdk (`slang-wasm-lib`)             |
+|---|---|-----------------------------------------|
+| Toolchain | Emscripten SDK (`emcmake`) | WASI SDK                                |
+| Bindings | C++ via embind (`EMSCRIPTEN_BINDINGS`) | Flat C ABI (`extern "C"` shim)          |
+| Runtime | Browser / Node.js | Any WASI-compatible WebAssembly runtime |
+| Output | `slang-wasm.js` + `slang-wasm.wasm` | `slang-wasm-lib.wasm`                   |
+| Preset | `emscripten` / `emscripten` | `wasi` / `slang-wasm-lib`               |
+
+#### Emscripten Build (`slang-wasm` — browser / Node.js)
+
+In order to build the Emscripten WebAssembly target, Slang needs to be compiled
+with the [Emscripten SDK](https://github.com/emscripten-core/emsdk). You can
+find more information about [Emscripten](https://emscripten.org/).
+
+You need to clone the EMSDK repo and install and activate the latest version.
 
 ```bash
 git clone https://github.com/emscripten-core/emsdk.git
@@ -124,6 +137,43 @@ cmake --build --preset emscripten --target slang-wasm
 
 > Note: If the last build step fails, try running the command that `emcmake`
 > outputs, directly.
+
+#### WASKI-SDK Build (`slang-wasm-lib`)
+
+`slang-wasm-lib` is a self-contained WASI reactor `.wasm` module with a flat C
+ABI. It has **no dependency on Emscripten** at build time or run time, and can
+be loaded by any WASI-compatible WebAssembly runtime.
+
+**Prerequisites:** [WASI-SDK](https://github.com/WebAssembly/wasi-sdk/releases)
+(version 33 or later). Download and unpack the release for your platform, then
+set `WASI_SDK_PATH` to the unpacked directory:
+
+```bash
+# Example for macOS arm64 — adjust the filename for your platform.
+curl -L -o /tmp/wasi-sdk.tar.gz \
+  https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-33/wasi-sdk-33.0-arm64-macos.tar.gz
+tar xf /tmp/wasi-sdk.tar.gz -C /opt
+export WASI_SDK_PATH=/opt/wasi-sdk-33
+```
+
+Build sequence (same cross-compiling pattern as Emscripten — native generators
+first, then the WASI cross build):
+
+```bash
+# 1. Build native generators (skip if already built for another preset).
+cmake --workflow --preset generators --fresh
+mkdir -p generators
+cmake --install build --config Release --prefix generators --component generators
+
+# 2. Configure with wasi-sdk.
+export WASI_SDK_PATH=/path/to/wasi-sdk
+cmake -DSLANG_GENERATORS_PATH=generators/bin --preset wasi
+
+# 3. Build the wasm lib.
+cmake --build --preset slang-wasm-lib
+```
+
+Output: `build.wasi/Release/bin/slang-wasm-lib.wasm`
 
 ### Android build
 

@@ -146,7 +146,7 @@ String SharedLibraryUtils::getSharedLibraryFileName(void* symbolInLib)
     }
     return String::fromWString(filenameBuffer);
 
-#elif defined(__linux__) || defined(SLANG_OSX)
+#elif (defined(__linux__) || SLANG_OSX) && !SLANG_WASM
     Dl_info dllInfo;
     if (!dladdr(symbolInLib, &dllInfo))
     {

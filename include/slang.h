@@ -115,7 +115,7 @@ Most applications should not need to touch this section.
         #define SLANG_PSP2 1
     #elif defined(__ghs__)
         #define SLANG_WIIU 1
-    #elif defined(__EMSCRIPTEN__)
+    #elif defined(__EMSCRIPTEN__) || defined(__wasi__)
         #define SLANG_WASM 1
     #else
         #error "unknown target platform"
@@ -425,7 +425,7 @@ convention for interface methods.
     #define SLANG_PROCESSOR_ARM 1
 #elif defined(_M_ARM64) || defined(__aarch64__) || defined(__ARM_ARCH_ISA_A64)
     #define SLANG_PROCESSOR_ARM_64 1
-#elif defined(__EMSCRIPTEN__)
+#elif defined(__EMSCRIPTEN__) || defined(__wasm__) || defined(__wasi__)
     #define SLANG_PROCESSOR_WASM 1
 #endif
 

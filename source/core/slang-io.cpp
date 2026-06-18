@@ -124,6 +124,15 @@ namespace Slang
     outFileName = tempFileName;
     return SLANG_OK;
 }
+#elif SLANG_WASM
+/* static */ SlangResult File::generateTemporary(
+    const UnownedStringSlice& /* inPrefix */,
+    Slang::String& /* outFileName */)
+{
+    // WASI does not provide mkstemp; temporary file creation is not available
+    // on the compile-from-string path that slang-wasm-lib uses.
+    return SLANG_FAIL;
+}
 #else
 /* static */ SlangResult File::generateTemporary(
     const UnownedStringSlice& inPrefix,
