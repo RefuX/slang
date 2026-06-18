@@ -17,11 +17,37 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")
     return()
 endif()
 
+# ---------------------------------------------------------------------------
+# code-generation — regenerate enum bindings when slang.h changes.
+# ---------------------------------------------------------------------------
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+set(_slang_h "${slang_SOURCE_DIR}/include/slang.h")
+set(_enum_meta_cpp "${CMAKE_CURRENT_SOURCE_DIR}/slang-wasm-enum-metadata.cpp")
+set(_java_enum_dir
+    "${CMAKE_CURRENT_SOURCE_DIR}/java/src/generated/java/org/shaderslang/wasm/enums"
+)
+
+if(${_slang_h} IS_NEWER_THAN ${_enum_meta_cpp})
+    message(STATUS "slang-wasm-lib: regenerating enum bindings from slang.h")
+    execute_process(
+        COMMAND
+            ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate-slang-bindings.py"
+            "--slang-h" "${_slang_h}"
+            "--cpp-out" "${_enum_meta_cpp}"
+            "--java-out" "${_java_enum_dir}"
+        RESULT_VARIABLE _gen_result
+    )
+    if(NOT _gen_result EQUAL 0)
+        message(FATAL_ERROR "generate-slang-bindings.py failed (exit ${_gen_result})")
+    endif()
+endif()
+
 # libunwind is not auto-linked by -fwasm-exceptions in wasi-sdk; the eh/
 # sysroot subdirectory holds the EH-aware variant.
 set(WASI_EH_LIB_DIR "${CMAKE_SYSROOT}/lib/wasm32-wasip1/eh")
 
-add_executable(slang-wasm-lib slang-wasm-lib.cpp)
+add_executable(slang-wasm-lib slang-wasm-lib.cpp slang-wasm-enum-metadata.cpp)
 
 set_target_properties(
     slang-wasm-lib
@@ -81,6 +107,9 @@ target_link_options(
         -Wl,--export=slang_wasm_result_diagnostics_len
         -Wl,--export=slang_wasm_result_destroy
         -Wl,--export=slang_wasm_version
+        # enum metadata exports (static JSON blob, no free required).
+        -Wl,--export=slang_wasm_enum_metadata_ptr
+        -Wl,--export=slang_wasm_enum_metadata_len
         # libunwind is not auto-linked by -fwasm-exceptions in wasi-sdk.
         -L${WASI_EH_LIB_DIR}
         -lunwind
