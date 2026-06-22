@@ -3,11 +3,17 @@ package org.shaderslang.wasm;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.shaderslang.wasm.enums.CompilerOptionName;
+import org.shaderslang.wasm.enums.OptimizationLevel;
+import org.shaderslang.wasm.enums.Target;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.shaderslang.wasm.SlangCompiler.fromWasm;
 
 /**
  * Smoke tests for SlangCompiler against the real slang-wasm-lib.wasm artifact.
@@ -141,6 +147,96 @@ class SlangCompilerSmokeTest {
                     + "Diagnostics:\n" + result.diagnostics());
             assertTrue(result.code().length > 0,
                     "Expected non-empty SPIR-V from nested shader");
+        }
+    }
+
+    // ── preprocessor macro defines via the session builder ──────────
+
+    @Test
+    void macroDefineChangesCompiledOutput() throws Exception {
+        String source =
+            "RWStructuredBuffer<float> output;\n" +
+            "[shader(\"compute\")] [numthreads(1,1,1)]\n" +
+            "void main() {\n" +
+            "#ifdef MY_DEFINE\n" +
+            "    output[0] = 1.0f;\n" +
+            "#else\n" +
+            "    output[0] = 2.0f;\n" +
+            "#endif\n" +
+            "}";
+
+        // Without the macro defined: compiles, but takes the #else branch.
+        // One instance per WASM module load (~20 MB); load it once and reuse it
+        // for both sessions in this test to stay within the test JVM's heap.
+        try (var without = fromWasm(
+                wasmPath,
+                List.of(SlangCompiler.TargetSpec.of(Target.SPIRV)),
+                Map.of(),
+                List.of())) {
+            CompileResult r = without.compile("undef", source, "main");
+            assertTrue(r.succeeded(), "Expected compile without macro to succeed. Diagnostics:\n"
+                    + r.diagnostics());
+        }
+
+        // With the macro defined via the macro-list builder: still compiles
+        // (and takes the #ifdef branch, though we only assert success here —
+        // the point of this test is that slang_wasm_macro_list_add actually
+        // reaches the preprocessor).
+        try (var with = fromWasm(
+                wasmPath,
+                List.of(SlangCompiler.TargetSpec.of(Target.SPIRV)),
+                Map.of("MY_DEFINE", "1"),
+                List.of())) {
+            CompileResult r = with.compile("def", source, "main");
+            assertTrue(r.succeeded(), "Expected compile with macro to succeed. Diagnostics:\n"
+                    + r.diagnostics());
+            assertTrue(r.code().length > 0, "Expected non-empty SPIR-V with macro defined");
+        }
+    }
+
+    // ── session-wide compiler options (CompilerOptionName) ──────────
+
+    @Test
+    void compilerOptionsAffectCompilation() throws Exception {
+        try (var slang = fromWasm(
+                wasmPath,
+                List.of(SlangCompiler.TargetSpec.of(Target.SPIRV)),
+                Map.of(),
+                List.of(),
+                List.of(SlangCompiler.CompilerOption.of(
+                        CompilerOptionName.Optimization, OptimizationLevel.NONE.value)))) {
+
+            CompileResult result = slang.compile("opt", TRIVIAL_SHADER, "main");
+            assertTrue(result.succeeded(),
+                    "Expected compile with an explicit optimization-level option to succeed. "
+                    + "Diagnostics:\n" + result.diagnostics());
+            assertTrue(result.code().length > 0, "Expected non-empty SPIR-V");
+        }
+    }
+
+    // ── multi-target session, compile by target index ───────────────
+
+    @Test
+    void twoTargetSessionCompilesBothTargetsByIndex() throws Exception {
+        try (var slang = fromWasm(
+                wasmPath,
+                List.of(
+                        SlangCompiler.TargetSpec.of(Target.SPIRV, "spirv_1_4"),
+                        SlangCompiler.TargetSpec.of(Target.HLSL)),
+                Map.of(),
+                List.of())) {
+
+            CompileResult spirv = slang.compile("multi", TRIVIAL_SHADER, "main", 0);
+            assertTrue(spirv.succeeded(),
+                    "Expected target index 0 (SPIR-V) to succeed. Diagnostics:\n"
+                    + spirv.diagnostics());
+            assertTrue(spirv.code().length >= 4, "Expected non-empty SPIR-V");
+
+            CompileResult hlsl = slang.compile("multi", TRIVIAL_SHADER, "main", 1);
+            assertTrue(hlsl.succeeded(),
+                    "Expected target index 1 (HLSL) to succeed. Diagnostics:\n"
+                    + hlsl.diagnostics());
+            assertTrue(hlsl.code().length > 0, "Expected non-empty HLSL source");
         }
     }
 

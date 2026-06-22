@@ -110,6 +110,23 @@ target_link_options(
         # enum metadata exports (static JSON blob, no free required).
         -Wl,--export=slang_wasm_enum_metadata_ptr
         -Wl,--export=slang_wasm_enum_metadata_len
+        -Wl,--export=slang_wasm_target_from_string
+        -Wl,--export=slang_wasm_stage_from_string
+        # session descriptor builder exports.
+        -Wl,--export=slang_wasm_target_list_create
+        -Wl,--export=slang_wasm_target_list_add
+        -Wl,--export=slang_wasm_target_list_destroy
+        -Wl,--export=slang_wasm_macro_list_create
+        -Wl,--export=slang_wasm_macro_list_add
+        -Wl,--export=slang_wasm_macro_list_destroy
+        -Wl,--export=slang_wasm_path_list_create
+        -Wl,--export=slang_wasm_path_list_add
+        -Wl,--export=slang_wasm_path_list_destroy
+        -Wl,--export=slang_wasm_options_create
+        -Wl,--export=slang_wasm_options_add_string
+        -Wl,--export=slang_wasm_options_add_int
+        -Wl,--export=slang_wasm_options_destroy
+        -Wl,--export=slang_wasm_session_create2
         # libunwind is not auto-linked by -fwasm-exceptions in wasi-sdk.
         -L${WASI_EH_LIB_DIR}
         -lunwind

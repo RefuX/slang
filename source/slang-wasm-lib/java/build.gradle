@@ -27,7 +27,7 @@ dependencies {
 test {
     useJUnitPlatform()
 
-    jvmArgs '-Xmx1g'
+    jvmArgs '-Xmx2g'
 
     // Point tests at the WASM artifact. Override with -Pslang.wasm.path=...
     // or the SLANG_WASM_PATH environment variable.

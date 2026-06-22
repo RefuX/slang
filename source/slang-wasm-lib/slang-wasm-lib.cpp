@@ -20,10 +20,13 @@
 #include <slang-deprecated.h>
 
 #include <cassert>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // WASM_ASSERT is defined in internal core headers not available to
@@ -40,11 +43,56 @@
 
 using Slang::ComPtr;
 
+// Declared in slang-wasm-enum-metadata.cpp; reused here to back
+// slang_wasm_target_from_string / slang_wasm_stage_from_string without
+// duplicating the name tables.
+extern "C" uint32_t slang_wasm_enum_metadata_ptr(void);
+extern "C" uint32_t slang_wasm_enum_metadata_len(void);
+
 // ── Internal types ────────────────────────────────────────────────────────────
 
 struct WasmSession
 {
     ComPtr<slang::ISession> session;
+};
+
+// Builder for a slang::TargetDesc list. Profiles are resolved to a
+// SlangProfileID eagerly (spFindProfile needs only the global session, not the
+// session being built), so the builder owns no string state past add-time.
+struct WasmTargetList
+{
+    std::vector<slang::TargetDesc> targets;
+};
+
+// Builder for a slang::PreprocessorMacroDesc list. Owns the name/value strings
+// so the PreprocessorMacroDesc::name/value pointers (built lazily) stay valid.
+struct WasmMacroList
+{
+    std::vector<std::pair<std::string, std::string>> entries;
+};
+
+// Builder for a search-path list. Owns the path strings for the same reason.
+struct WasmPathList
+{
+    std::vector<std::string> paths;
+};
+
+// One session-wide compiler option entry, stored in raw form so the
+// CompilerOptionEntry/CompilerOptionValue actually handed to Slang is built
+// only once, at session_create2 time, after the builder is fully populated and
+// its backing strings are no longer subject to reallocation.
+struct WasmOptionEntry
+{
+    slang::CompilerOptionName name;
+    bool isString;
+    int32_t intValue = 0;
+    std::string stringValue;
+};
+
+// Builder for a slang::CompilerOptionEntry list.
+struct WasmOptions
+{
+    std::vector<WasmOptionEntry> entries;
 };
 
 struct WasmResult
@@ -61,8 +109,43 @@ static ComPtr<slang::IGlobalSession> g_globalSession;
 
 static std::unordered_map<uint32_t, WasmSession*> g_sessions;
 static std::unordered_map<uint32_t, WasmResult*> g_results;
+static std::unordered_map<uint32_t, WasmTargetList*> g_targetLists;
+static std::unordered_map<uint32_t, WasmMacroList*> g_macroLists;
+static std::unordered_map<uint32_t, WasmPathList*> g_pathLists;
+static std::unordered_map<uint32_t, WasmOptions*> g_optionLists;
 static uint32_t g_nextSessionHandle = 1;
 static uint32_t g_nextResultHandle = 1;
+static uint32_t g_nextTargetListHandle = 1;
+static uint32_t g_nextMacroListHandle = 1;
+static uint32_t g_nextPathListHandle = 1;
+static uint32_t g_nextOptionsHandle = 1;
+
+// Insert `value` into `table` under a freshly allocated handle from `*nextHandle`.
+template<typename T>
+static uint32_t insertHandle(
+    std::unordered_map<uint32_t, T*>& table,
+    uint32_t* nextHandle,
+    T* value)
+{
+    uint32_t handle = (*nextHandle)++;
+    table[handle] = value;
+    return handle;
+}
+
+// Pop and return the value for `handle` from `table`, or nullptr if absent.
+// Used to consume a builder handle exactly once (e.g. inside session_create2).
+template<typename T>
+static T* takeHandle(std::unordered_map<uint32_t, T*>& table, uint32_t handle)
+{
+    if (handle == 0)
+        return nullptr;
+    auto it = table.find(handle);
+    if (it == table.end())
+        return nullptr;
+    T* value = it->second;
+    table.erase(it);
+    return value;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -97,44 +180,281 @@ extern "C" void slang_wasm_free(void* ptr)
     free(ptr);
 }
 
+// ── Enum metadata ─────────────────────────────────────────────────────────────
+
+// Look up `name` (case-sensitively, against the upper-cased enumerator name
+// recorded in the generated metadata blob) under the JSON sub-object `section`,
+// matching e.g. "spirv" -> "SPIRV" : 6. Returns -1 if not found. Implemented by
+// a small hand-rolled scan rather than a JSON parser: the metadata blob is a
+// flat, generator-produced object with no nesting beyond two levels.
+static int32_t lookupEnumByLowercaseName(const char* section, const std::string& nameUpper)
+{
+    const char* json = reinterpret_cast<const char*>(
+        static_cast<uintptr_t>(slang_wasm_enum_metadata_ptr()));
+    size_t jsonLen = slang_wasm_enum_metadata_len();
+    std::string blob(json, jsonLen);
+
+    std::string sectionKey = std::string("\"") + section + "\":{";
+    size_t sectionPos = blob.find(sectionKey);
+    if (sectionPos == std::string::npos)
+        return -1;
+    size_t sectionStart = sectionPos + sectionKey.size();
+    size_t sectionEnd = blob.find("}", sectionStart);
+    if (sectionEnd == std::string::npos)
+        return -1;
+
+    std::string entryKey = std::string("\"") + nameUpper + "\":";
+    size_t entryPos = blob.find(entryKey, sectionStart);
+    if (entryPos == std::string::npos || entryPos >= sectionEnd)
+        return -1;
+
+    size_t valueStart = entryPos + entryKey.size();
+    return static_cast<int32_t>(std::strtol(blob.c_str() + valueStart, nullptr, 10));
+}
+
+// Upper-case a string in place, matching the generator's enumerator naming
+// convention (e.g. "spirv" -> "SPIRV").
+static std::string toUpper(const char* s, uint32_t len)
+{
+    std::string out(s, len);
+    for (char& c : out)
+        c = static_cast<char>(::toupper(static_cast<unsigned char>(c)));
+    return out;
+}
+
+extern "C" int32_t slang_wasm_target_from_string(const char* name, uint32_t nameLen)
+{
+    if (!name || nameLen == 0)
+        return -1;
+    return lookupEnumByLowercaseName("Target", toUpper(name, nameLen));
+}
+
+extern "C" int32_t slang_wasm_stage_from_string(const char* name, uint32_t nameLen)
+{
+    if (!name || nameLen == 0)
+        return -1;
+    return lookupEnumByLowercaseName("Stage", toUpper(name, nameLen));
+}
+
+// ── Session descriptor builders ───────────────────────────────────────────────
+
+extern "C" SlangWasmTargetList slang_wasm_target_list_create(void)
+{
+    return insertHandle(g_targetLists, &g_nextTargetListHandle, new WasmTargetList());
+}
+
+extern "C" void slang_wasm_target_list_add(
+    SlangWasmTargetList listHandle,
+    uint32_t format,
+    const char* profile,
+    uint32_t profileLen,
+    uint32_t flags)
+{
+    auto it = g_targetLists.find(listHandle);
+    WASM_ASSERT(it != g_targetLists.end());
+
+    ensureGlobalSession();
+
+    slang::TargetDesc target = {};
+    target.format = static_cast<SlangCompileTarget>(format);
+    target.flags = static_cast<SlangTargetFlags>(flags);
+    if (profile && profileLen > 0 && g_globalSession)
+    {
+        std::string profileStr(profile, profileLen);
+        target.profile = spFindProfile(g_globalSession, profileStr.c_str());
+    }
+    it->second->targets.push_back(target);
+}
+
+extern "C" void slang_wasm_target_list_destroy(SlangWasmTargetList handle)
+{
+    delete takeHandle(g_targetLists, handle);
+}
+
+extern "C" SlangWasmMacroList slang_wasm_macro_list_create(void)
+{
+    return insertHandle(g_macroLists, &g_nextMacroListHandle, new WasmMacroList());
+}
+
+extern "C" void slang_wasm_macro_list_add(
+    SlangWasmMacroList listHandle,
+    const char* name,
+    uint32_t nameLen,
+    const char* value,
+    uint32_t valueLen)
+{
+    auto it = g_macroLists.find(listHandle);
+    WASM_ASSERT(it != g_macroLists.end());
+    it->second->entries.emplace_back(
+        std::string(name, nameLen),
+        std::string(value ? value : "", value ? valueLen : 0));
+}
+
+extern "C" void slang_wasm_macro_list_destroy(SlangWasmMacroList handle)
+{
+    delete takeHandle(g_macroLists, handle);
+}
+
+extern "C" SlangWasmPathList slang_wasm_path_list_create(void)
+{
+    return insertHandle(g_pathLists, &g_nextPathListHandle, new WasmPathList());
+}
+
+extern "C" void slang_wasm_path_list_add(
+    SlangWasmPathList listHandle,
+    const char* path,
+    uint32_t pathLen)
+{
+    auto it = g_pathLists.find(listHandle);
+    WASM_ASSERT(it != g_pathLists.end());
+    it->second->paths.emplace_back(path, pathLen);
+}
+
+extern "C" void slang_wasm_path_list_destroy(SlangWasmPathList handle)
+{
+    delete takeHandle(g_pathLists, handle);
+}
+
+extern "C" SlangWasmOptions slang_wasm_options_create(void)
+{
+    return insertHandle(g_optionLists, &g_nextOptionsHandle, new WasmOptions());
+}
+
+extern "C" void slang_wasm_options_add_string(
+    SlangWasmOptions optsHandle,
+    uint32_t name,
+    const char* val,
+    uint32_t valLen)
+{
+    auto it = g_optionLists.find(optsHandle);
+    WASM_ASSERT(it != g_optionLists.end());
+    WasmOptionEntry entry;
+    entry.name = static_cast<slang::CompilerOptionName>(name);
+    entry.isString = true;
+    entry.stringValue.assign(val, valLen);
+    it->second->entries.push_back(std::move(entry));
+}
+
+extern "C" void slang_wasm_options_add_int(SlangWasmOptions optsHandle, uint32_t name, int32_t val)
+{
+    auto it = g_optionLists.find(optsHandle);
+    WASM_ASSERT(it != g_optionLists.end());
+    WasmOptionEntry entry;
+    entry.name = static_cast<slang::CompilerOptionName>(name);
+    entry.isString = false;
+    entry.intValue = val;
+    it->second->entries.push_back(std::move(entry));
+}
+
+extern "C" void slang_wasm_options_destroy(SlangWasmOptions handle)
+{
+    delete takeHandle(g_optionLists, handle);
+}
+
 // ── Session ───────────────────────────────────────────────────────────────────
 
-extern "C" SlangWasmSession slang_wasm_session_create(
-    uint32_t targetFormat,
-    const char* profile,
-    uint32_t profileLen)
+extern "C" SlangWasmSession slang_wasm_session_create2(
+    SlangWasmTargetList targetsHandle,
+    SlangWasmMacroList macrosHandle,
+    SlangWasmPathList pathsHandle,
+    SlangWasmOptions optionsHandle)
 {
+    // Builders are consumed exactly once: take ownership now so they are freed
+    // on every return path (failure or success) without duplicating cleanup.
+    std::unique_ptr<WasmTargetList> targets(takeHandle(g_targetLists, targetsHandle));
+    std::unique_ptr<WasmMacroList> macros(takeHandle(g_macroLists, macrosHandle));
+    std::unique_ptr<WasmPathList> paths(takeHandle(g_pathLists, pathsHandle));
+    std::unique_ptr<WasmOptions> options(takeHandle(g_optionLists, optionsHandle));
+
     try
     {
         if (!ensureGlobalSession())
             return 0;
+        if (!targets || targets->targets.empty())
+            return 0; // SessionDesc requires at least one target.
 
-        slang::TargetDesc target = {};
-        target.format = static_cast<SlangCompileTarget>(targetFormat);
-
-        if (profile && profileLen > 0)
+        std::vector<slang::PreprocessorMacroDesc> macroDescs;
+        if (macros)
         {
-            std::string profileStr(profile, profileLen);
-            target.profile = spFindProfile(g_globalSession, profileStr.c_str());
+            macroDescs.reserve(macros->entries.size());
+            for (auto& kv : macros->entries)
+                macroDescs.push_back({kv.first.c_str(), kv.second.c_str()});
+        }
+
+        std::vector<const char*> pathPtrs;
+        if (paths)
+        {
+            pathPtrs.reserve(paths->paths.size());
+            for (auto& p : paths->paths)
+                pathPtrs.push_back(p.c_str());
+        }
+
+        std::vector<slang::CompilerOptionEntry> optionEntries;
+        if (options)
+        {
+            optionEntries.reserve(options->entries.size());
+            for (auto& e : options->entries)
+            {
+                slang::CompilerOptionEntry entry = {};
+                entry.name = e.name;
+                if (e.isString)
+                {
+                    entry.value.kind = slang::CompilerOptionValueKind::String;
+                    entry.value.stringValue0 = e.stringValue.c_str();
+                }
+                else
+                {
+                    entry.value.kind = slang::CompilerOptionValueKind::Int;
+                    entry.value.intValue0 = e.intValue;
+                }
+                optionEntries.push_back(entry);
+            }
         }
 
         slang::SessionDesc sessionDesc = {};
-        sessionDesc.targets = &target;
-        sessionDesc.targetCount = 1;
+        sessionDesc.targets = targets->targets.data();
+        sessionDesc.targetCount = static_cast<SlangInt>(targets->targets.size());
+        if (!macroDescs.empty())
+        {
+            sessionDesc.preprocessorMacros = macroDescs.data();
+            sessionDesc.preprocessorMacroCount = static_cast<SlangInt>(macroDescs.size());
+        }
+        if (!pathPtrs.empty())
+        {
+            sessionDesc.searchPaths = pathPtrs.data();
+            sessionDesc.searchPathCount = static_cast<SlangInt>(pathPtrs.size());
+        }
+        if (!optionEntries.empty())
+        {
+            sessionDesc.compilerOptionEntries = optionEntries.data();
+            sessionDesc.compilerOptionEntryCount =
+                static_cast<uint32_t>(optionEntries.size());
+        }
 
         ComPtr<slang::ISession> session;
         SlangResult r = g_globalSession->createSession(sessionDesc, session.writeRef());
         if (SLANG_FAILED(r))
             return 0;
 
-        uint32_t handle = g_nextSessionHandle++;
-        g_sessions[handle] = new WasmSession{std::move(session)};
-        return handle;
+        return insertHandle(
+            g_sessions,
+            &g_nextSessionHandle,
+            new WasmSession{std::move(session)});
     }
     catch (...)
     {
         return 0;
     }
+}
+
+extern "C" SlangWasmSession slang_wasm_session_create(
+    uint32_t targetFormat,
+    const char* profile,
+    uint32_t profileLen)
+{
+    SlangWasmTargetList targets = slang_wasm_target_list_create();
+    slang_wasm_target_list_add(targets, targetFormat, profile, profileLen, 0);
+    return slang_wasm_session_create2(targets, 0, 0, 0);
 }
 
 extern "C" void slang_wasm_session_destroy(SlangWasmSession handle)
@@ -155,7 +475,8 @@ extern "C" SlangWasmResult slang_wasm_compile(
     const char* source,
     uint32_t sourceLen,
     const char* entryName,
-    uint32_t entryNameLen)
+    uint32_t entryNameLen,
+    uint32_t targetIndex)
 {
     auto* result = new WasmResult();
     uint32_t resultHandle = g_nextResultHandle++;
@@ -211,10 +532,16 @@ extern "C" SlangWasmResult slang_wasm_compile(
         if (SLANG_FAILED(r) || !linked)
             return resultHandle;
 
-        // Step 5: get the compiled target code.
+        // Step 5: get the compiled target code, for the target at `targetIndex`
+        // (its position in the SlangWasmTargetList the session was created
+        // with — 0 for the common single-target case).
         ComPtr<slang::IBlob> codeBlob;
         diagBlob = nullptr;
-        r = linked->getEntryPointCode(0, 0, codeBlob.writeRef(), diagBlob.writeRef());
+        r = linked->getEntryPointCode(
+            0,
+            static_cast<SlangInt>(targetIndex),
+            codeBlob.writeRef(),
+            diagBlob.writeRef());
         appendBlob(result->diagnostics, diagBlob);
         if (SLANG_FAILED(r) || !codeBlob)
             return resultHandle;
@@ -224,7 +551,8 @@ extern "C" SlangWasmResult slang_wasm_compile(
 
         // Step 6: serialize reflection to JSON.
         diagBlob = nullptr;
-        slang::ProgramLayout* layout = linked->getLayout(0, diagBlob.writeRef());
+        slang::ProgramLayout* layout =
+            linked->getLayout(static_cast<SlangInt>(targetIndex), diagBlob.writeRef());
         appendBlob(result->diagnostics, diagBlob);
         if (layout)
         {
