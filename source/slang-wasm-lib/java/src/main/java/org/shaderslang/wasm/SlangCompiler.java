@@ -7,6 +7,9 @@ import run.endive.wasi.WasiOptions;
 import run.endive.wasi.WasiPreview1;
 
 import org.shaderslang.wasm.enums.CompilerOptionName;
+import org.shaderslang.wasm.enums.DebugInfoLevel;
+import org.shaderslang.wasm.enums.MatrixLayoutMode;
+import org.shaderslang.wasm.enums.OptimizationLevel;
 import org.shaderslang.wasm.enums.Target;
 import org.shaderslang.wasm.enums.TargetFlags;
 
@@ -15,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -106,12 +110,148 @@ public final class SlangCompiler implements AutoCloseable {
         }
     }
 
+    /**
+     * A specialization argument for a generic shader parameter (mirrors
+     * SlangShaderSharp's {@code SpecializationArg}): either a concrete type name
+     * or a constant expression. Not yet consumed by any C ABI export — a
+     * Phase 11 prerequisite, recorded here so callers can start building
+     * specialization argument lists against a stable type.
+     */
+    public static final class SpecializationArg {
+        final boolean isType;
+        final String value;
+
+        private SpecializationArg(boolean isType, String value) {
+            this.isType = isType;
+            this.value = value;
+        }
+
+        /** A specialization argument naming a concrete type, e.g. {@code "PbrMaterial"}. */
+        public static SpecializationArg fromType(String typeName) {
+            return new SpecializationArg(true, typeName);
+        }
+
+        /** A specialization argument that is a constant expression, e.g. {@code "32"}. */
+        public static SpecializationArg fromExpression(String expression) {
+            return new SpecializationArg(false, expression);
+        }
+    }
+
+    /**
+     * Fluent builder for a {@code SlangCompiler} session (mirrors
+     * {@code slang::SessionDesc}), as an alternative to the positional
+     * {@link #fromWasm(Path, List, Map, List, List)} overload. Obtain via
+     * {@link #builder()}.
+     */
+    public static final class SessionBuilder {
+        private Path wasmPath;
+        private final List<TargetSpec> targets = new ArrayList<>();
+        private final Map<String, String> macros = new LinkedHashMap<>();
+        private final List<String> searchPaths = new ArrayList<>();
+        private final List<CompilerOption> options = new ArrayList<>();
+
+        private SessionBuilder() {}
+
+        /** The WASM module file to load. Required before calling {@link #build()}. */
+        public SessionBuilder wasm(Path wasmPath) {
+            this.wasmPath = wasmPath;
+            return this;
+        }
+
+        /** Add a compile target with no profile override and no flags. */
+        public SessionBuilder target(Target format) {
+            targets.add(TargetSpec.of(format));
+            return this;
+        }
+
+        /** Add a compile target with an explicit profile, e.g. {@code "spirv_1_4"}. */
+        public SessionBuilder target(Target format, String profile) {
+            targets.add(TargetSpec.of(format, profile));
+            return this;
+        }
+
+        /** Add a compile target built from a {@link TargetSpec} (profile and/or flags). */
+        public SessionBuilder target(TargetSpec target) {
+            targets.add(target);
+            return this;
+        }
+
+        /** Define preprocessor macro {@code name} as {@code value} (empty for a valueless define). */
+        public SessionBuilder define(String name, String value) {
+            macros.put(name, value);
+            return this;
+        }
+
+        /** Add a search path for resolving {@code #include}/{@code import}ed files. */
+        public SessionBuilder searchPath(Path path) {
+            searchPaths.add(path.toString());
+            return this;
+        }
+
+        /** Add a raw session-wide {@link CompilerOption} entry not covered by a named method below. */
+        public SessionBuilder option(CompilerOption option) {
+            options.add(option);
+            return this;
+        }
+
+        /** Set the optimization level ({@code CompilerOptionName.Optimization}). */
+        public SessionBuilder optimizationLevel(OptimizationLevel level) {
+            return option(CompilerOption.of(CompilerOptionName.Optimization, level.value));
+        }
+
+        /** Set the debug info level ({@code CompilerOptionName.DebugInformation}). */
+        public SessionBuilder debugInfo(DebugInfoLevel level) {
+            return option(CompilerOption.of(CompilerOptionName.DebugInformation, level.value));
+        }
+
+        /**
+         * Set the default matrix layout ({@code CompilerOptionName.MatrixLayoutColumn} /
+         * {@code MatrixLayoutRow} — Slang models these as two separate bool-valued options,
+         * not one enum-valued one).
+         */
+        public SessionBuilder matrixLayout(MatrixLayoutMode mode) {
+            switch (mode) {
+                case COLUMN_MAJOR:
+                    return option(CompilerOption.of(CompilerOptionName.MatrixLayoutColumn, 1));
+                case ROW_MAJOR:
+                    return option(CompilerOption.of(CompilerOptionName.MatrixLayoutRow, 1));
+                default:
+                    throw new IllegalArgumentException("Unsupported matrix layout: " + mode);
+            }
+        }
+
+        /**
+         * Instantiate the WASM module and create the configured session.
+         *
+         * @throws IllegalStateException if {@link #wasm} was never called or no
+         *                                target was ever added
+         * @throws IOException if the WASM file cannot be read, the module fails
+         *                     to instantiate, or session creation fails
+         */
+        public SlangCompiler build() throws IOException {
+            if (wasmPath == null) {
+                throw new IllegalStateException("wasm(Path) is required");
+            }
+            if (targets.isEmpty()) {
+                throw new IllegalStateException("at least one target(...) is required");
+            }
+            return fromWasm(wasmPath, targets, macros, searchPaths, options);
+        }
+    }
+
+    /** Begin building a session with {@link SessionBuilder}. */
+    public static SessionBuilder builder() {
+        return new SessionBuilder();
+    }
+
     private final Instance instance;
     private final long sessionHandle;
+    private final List<Target> targetFormats;
 
-    private SlangCompiler(Instance instance, long sessionHandle) {
+    private SlangCompiler(Instance instance, long sessionHandle, List<Target> targetFormats) {
         this.instance = instance;
         this.sessionHandle = sessionHandle;
+        this.targetFormats = targetFormats;
     }
 
     /**
@@ -154,7 +294,7 @@ public final class SlangCompiler implements AutoCloseable {
                     "slang_wasm_session_create returned 0 — failed to create Slang session");
         }
 
-        return new SlangCompiler(inst, handle);
+        return new SlangCompiler(inst, handle, List.of(targetFormat));
     }
 
     /**
@@ -255,7 +395,41 @@ public final class SlangCompiler implements AutoCloseable {
                     "slang_wasm_session_create2 returned 0 — failed to create Slang session");
         }
 
-        return new SlangCompiler(inst, handle);
+        List<Target> formats = new ArrayList<>(targets.size());
+        for (TargetSpec target : targets) {
+            formats.add(target.format);
+        }
+        return new SlangCompiler(inst, handle, formats);
+    }
+
+    /**
+     * Position of {@code target} among the targets this session was created
+     * with, for use as the {@code targetIndex} the C ABI expects. Lets callers
+     * select a target by its {@link Target} value instead of a raw position.
+     *
+     * @throws IllegalArgumentException if {@code target} is not one of this
+     *                                  session's configured targets, or appears
+     *                                  more than once (ambiguous — use the
+     *                                  {@code int targetIndex} overloads instead)
+     */
+    private int targetIndexOf(Target target) {
+        int found = -1;
+        for (int i = 0; i < targetFormats.size(); i++) {
+            if (targetFormats.get(i) == target) {
+                if (found != -1) {
+                    throw new IllegalArgumentException(
+                            "Target " + target + " appears more than once in this session; "
+                            + "use the int targetIndex overload to disambiguate");
+                }
+                found = i;
+            }
+        }
+        if (found == -1) {
+            throw new IllegalArgumentException(
+                    "Target " + target + " is not one of this session's configured targets: "
+                    + targetFormats);
+        }
+        return found;
     }
 
     /** Parse, instantiate, and run the WASI reactor protocol's _initialize export. */
@@ -321,6 +495,79 @@ public final class SlangCompiler implements AutoCloseable {
         }
 
         return readCompileResult(resultHandle, "slang_wasm_compile");
+    }
+
+    /**
+     * Compile {@code source} as module {@code moduleName} and link entry point
+     * {@code entryPoint}, producing code for {@code target} (resolved to its
+     * position among this session's configured targets). Never throws for
+     * compile errors: errors are captured in the returned {@link CompileResult}.
+     *
+     * @throws IllegalArgumentException if {@code target} is not one of this
+     *                                  session's configured targets
+     */
+    public CompileResult compile(String moduleName, String source, String entryPoint, Target target) {
+        return compile(moduleName, source, entryPoint, targetIndexOf(target));
+    }
+
+    /**
+     * Compile a {@link CompileRequest} (a named-method alternative to the
+     * positional-argument {@link #compile(String, String, String)} overloads).
+     * Never throws for compile errors: errors are captured in the returned
+     * {@link CompileResult}.
+     */
+    public CompileResult compile(CompileRequest request) {
+        if (request.entryPoint == null) {
+            throw new IllegalStateException(
+                    "CompileRequest.entryPoint(...) must be called before compiling a single "
+                    + "entry point; use loadModule(...).compileAll(...) to compile every entry "
+                    + "point in a module");
+        }
+        return request.target != null
+                ? compile(request.moduleName, request.source, request.entryPoint, request.target)
+                : compile(request.moduleName, request.source, request.entryPoint, request.targetIndex);
+    }
+
+    /**
+     * A named-method alternative to the positional {@code (moduleName, source,
+     * entryPoint, target)} arguments of {@link #compile(String, String, String, Target)},
+     * built fluently and passed to {@link #compile(CompileRequest)}.
+     */
+    public static final class CompileRequest {
+        private final String moduleName;
+        private final String source;
+        private String entryPoint;
+        private Target target;
+        private int targetIndex = 0;
+
+        private CompileRequest(String moduleName, String source) {
+            this.moduleName = moduleName;
+            this.source = source;
+        }
+
+        /** Begin a request to compile {@code source} as module {@code moduleName}. */
+        public static CompileRequest source(String moduleName, String source) {
+            return new CompileRequest(moduleName, source);
+        }
+
+        /** The entry point to link and compile. Required before calling {@link #compile(CompileRequest)}. */
+        public CompileRequest entryPoint(String entryPoint) {
+            this.entryPoint = entryPoint;
+            return this;
+        }
+
+        /** Compile for {@code target} (resolved to its session position). Defaults to the session's first target. */
+        public CompileRequest target(Target target) {
+            this.target = target;
+            return this;
+        }
+
+        /** Compile for the target at {@code targetIndex}. Defaults to 0 (the session's first target). */
+        public CompileRequest target(int targetIndex) {
+            this.target = null;
+            this.targetIndex = targetIndex;
+            return this;
+        }
     }
 
     /** Read and destroy a {@code SlangWasmResult} handle, producing a {@link CompileResult}. */
@@ -452,6 +699,18 @@ public final class SlangCompiler implements AutoCloseable {
         }
 
         /**
+         * Compile entry point {@code entryPoint} from this module for
+         * {@code target} (resolved to its position among this session's
+         * configured targets). Never throws for compile errors.
+         *
+         * @throws IllegalArgumentException if {@code target} is not one of this
+         *                                  session's configured targets
+         */
+        public CompileResult compileEntryPoint(String entryPoint, Target target) {
+            return compileEntryPoint(entryPoint, targetIndexOf(target));
+        }
+
+        /**
          * Compile every entry point defined in this module together into one
          * combined code blob for the target at {@code targetIndex} (e.g. one
          * SPIR-V module containing both a vertex and a fragment entry point).
@@ -462,6 +721,17 @@ public final class SlangCompiler implements AutoCloseable {
             long resultHandle = instance.export("slang_wasm_compile_module")
                     .apply(sessionHandle, handle, (long) targetIndex)[0];
             return readCompileResult(resultHandle, "slang_wasm_compile_module");
+        }
+
+        /**
+         * Compile every entry point in this module together for {@code target}
+         * (resolved to its position among this session's configured targets).
+         *
+         * @throws IllegalArgumentException if {@code target} is not one of this
+         *                                  session's configured targets
+         */
+        public CompileResult compileAll(Target target) {
+            return compileAll(targetIndexOf(target));
         }
 
         @Override

@@ -305,6 +305,55 @@ class SlangCompilerSmokeTest {
         }
     }
 
+    // ── builder API ────────────────
+
+    @Test
+    void builderApiCompilesTwoTargetTwoEntryPointPipelineWithNoRawIntegers() throws Exception {
+        try (var slang = SlangCompiler.builder()
+                .wasm(wasmPath)
+                .target(Target.SPIRV, "spirv_1_4")
+                .target(Target.HLSL)
+                .define("ENABLE_FOO", "1")
+                .optimizationLevel(OptimizationLevel.NONE)
+                .build();
+             var module = slang.loadModule("pipeline-builder", VERT_FRAG_SHADER)) {
+
+            CompileResult vertSpirv = module.compileEntryPoint("vert", Target.SPIRV);
+            assertTrue(vertSpirv.succeeded(),
+                    "Expected \"vert\" on SPIR-V to succeed. Diagnostics:\n" + vertSpirv.diagnostics());
+            assertTrue(vertSpirv.code().length > 0, "Expected non-empty SPIR-V for \"vert\"");
+
+            CompileResult fragHlsl = module.compileEntryPoint("frag", Target.HLSL);
+            assertTrue(fragHlsl.succeeded(),
+                    "Expected \"frag\" on HLSL to succeed. Diagnostics:\n" + fragHlsl.diagnostics());
+            assertTrue(fragHlsl.code().length > 0, "Expected non-empty HLSL for \"frag\"");
+
+            CompileResult combined = module.compileAll(Target.SPIRV);
+            assertTrue(combined.succeeded(),
+                    "Expected combined compile on SPIR-V to succeed. Diagnostics:\n"
+                    + combined.diagnostics());
+
+            CompileResult viaRequest = slang.compile(
+                    SlangCompiler.CompileRequest.source("via-request", TRIVIAL_SHADER)
+                            .entryPoint("main")
+                            .target(Target.SPIRV));
+            assertTrue(viaRequest.succeeded(),
+                    "Expected CompileRequest-based compile to succeed. Diagnostics:\n"
+                    + viaRequest.diagnostics());
+        }
+    }
+
+    @Test
+    void targetIndexOfRejectsUnconfiguredTarget() throws Exception {
+        try (var slang = SlangCompiler.builder()
+                .wasm(wasmPath)
+                .target(Target.SPIRV)
+                .build()) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> slang.compile("x", TRIVIAL_SHADER, "main", Target.HLSL));
+        }
+    }
+
     // ── Version sanity check ──────────────────────────────────────────────────
 
     @Test
