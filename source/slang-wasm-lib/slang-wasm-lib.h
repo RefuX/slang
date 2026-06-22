@@ -144,6 +144,46 @@ SlangWasmSession slang_wasm_session_create2(
 // after this call.
 void slang_wasm_session_destroy(SlangWasmSession session);
 
+// ── Modules ───────────────────────────────────────────────────────────────────
+//
+// A module is parsed once and can then be queried for its defined entry points
+// and compiled from independently of any other module loaded into the same
+// session, unlike slang_wasm_compile (below) which loads, compiles, and
+// discards a module in one call.
+
+typedef uint32_t SlangWasmModule;
+
+// Load `source` as module `name` into `session` (mirrors
+// ISession::loadModuleFromSourceString). Returns 0 on failure. `diagPtrOut`/
+// `diagLenOut` (each a pointer into the module's own linear memory, e.g. from
+// slang_wasm_alloc) are always written — to a NULL/0 buffer if there were no
+// diagnostics, or to a freshly heap-allocated UTF-8 buffer (owned by the
+// caller; free with slang_wasm_free) otherwise. This is true on both success
+// (warnings) and failure (errors), unlike slang_wasm_compile's diagnostics
+// which are only retrievable via a result handle that does not exist when
+// there is no module to return.
+SlangWasmModule slang_wasm_session_load_module(
+    SlangWasmSession session,
+    const char* name,
+    uint32_t nameLen,
+    const char* source,
+    uint32_t sourceLen,
+    uint32_t* diagPtrOut,
+    uint32_t* diagLenOut);
+
+// Release a module handle. The handle must not be used after this call.
+void slang_wasm_module_destroy(SlangWasmModule module);
+
+// Number of entry points defined in the module (functions marked
+// `[shader("...")]`), per IModule::getDefinedEntryPointCount.
+uint32_t slang_wasm_module_entry_point_count(SlangWasmModule module);
+
+// Pointer and byte length of the name of the entry point at `index`
+// (0 <= index < slang_wasm_module_entry_point_count(module)). Valid until
+// slang_wasm_module_destroy.
+uint32_t slang_wasm_module_entry_point_name_ptr(SlangWasmModule module, uint32_t index);
+uint32_t slang_wasm_module_entry_point_name_len(SlangWasmModule module, uint32_t index);
+
 // ── Compilation ───────────────────────────────────────────────────────────────
 
 typedef uint32_t SlangWasmResult;
@@ -163,6 +203,31 @@ SlangWasmResult slang_wasm_compile(
     uint32_t sourceLen,
     const char* entryName,
     uint32_t entryNameLen,
+    uint32_t targetIndex);
+
+// Compile entry point `entryName` from an already-loaded `module` (see
+// slang_wasm_session_load_module), producing code for the target at
+// `targetIndex`. Equivalent to slang_wasm_compile but reuses a module already
+// parsed once, so multiple entry points from the same source can be compiled
+// independently without re-parsing. Same never-throws contract as
+// slang_wasm_compile.
+SlangWasmResult slang_wasm_compile_entry_point(
+    SlangWasmSession session,
+    SlangWasmModule module,
+    const char* entryName,
+    uint32_t entryNameLen,
+    uint32_t targetIndex);
+
+// Compile all of `module`'s defined entry points together into one combined
+// code blob for the target at `targetIndex` (mirrors
+// IComponentType::getTargetCode, which — unlike getEntryPointCode — returns a
+// single blob containing every entry point linked into the component, e.g. one
+// SPIR-V module with both a vertex and a fragment entry point). Reflection JSON
+// in the result covers the same combined layout. Same never-throws contract as
+// slang_wasm_compile.
+SlangWasmResult slang_wasm_compile_module(
+    SlangWasmSession session,
+    SlangWasmModule module,
     uint32_t targetIndex);
 
 // ── Result accessors ──────────────────────────────────────────────────────────

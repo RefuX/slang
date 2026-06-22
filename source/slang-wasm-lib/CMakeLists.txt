@@ -98,6 +98,14 @@ target_link_options(
         -Wl,--export=slang_wasm_session_create
         -Wl,--export=slang_wasm_session_destroy
         -Wl,--export=slang_wasm_compile
+        # module handle exports (Phase 7).
+        -Wl,--export=slang_wasm_session_load_module
+        -Wl,--export=slang_wasm_module_destroy
+        -Wl,--export=slang_wasm_module_entry_point_count
+        -Wl,--export=slang_wasm_module_entry_point_name_ptr
+        -Wl,--export=slang_wasm_module_entry_point_name_len
+        -Wl,--export=slang_wasm_compile_entry_point
+        -Wl,--export=slang_wasm_compile_module
         -Wl,--export=slang_wasm_result_succeeded
         -Wl,--export=slang_wasm_result_code_ptr
         -Wl,--export=slang_wasm_result_code_len

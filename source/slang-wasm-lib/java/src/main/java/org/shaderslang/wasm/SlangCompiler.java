@@ -13,6 +13,7 @@ import org.shaderslang.wasm.enums.TargetFlags;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
@@ -319,9 +320,14 @@ public final class SlangCompiler implements AutoCloseable {
             instance.export("slang_wasm_free").apply(entryPtr);
         }
 
+        return readCompileResult(resultHandle, "slang_wasm_compile");
+    }
+
+    /** Read and destroy a {@code SlangWasmResult} handle, producing a {@link CompileResult}. */
+    private CompileResult readCompileResult(long resultHandle, String sourceExportName) {
         if (resultHandle == 0) {
             return new CompileResult(false, new byte[0], "",
-                    "slang_wasm_compile returned handle 0");
+                    sourceExportName + " returned handle 0");
         }
 
         try {
@@ -338,6 +344,129 @@ public final class SlangCompiler implements AutoCloseable {
             return new CompileResult(ok, code, reflJson, diagnostics);
         } finally {
             instance.export("slang_wasm_result_destroy").apply(resultHandle);
+        }
+    }
+
+    /**
+     * Parse {@code source} as module {@code moduleName} once, returning a handle
+     * that can compile any number of its entry points independently without
+     * re-parsing. Unlike {@link #compile}, which loads, compiles, and discards a
+     * module in one call, the returned {@link SlangModule} stays loaded until
+     * closed.
+     *
+     * @throws IOException if the module fails to load; the exception message
+     *                      includes the diagnostics text
+     */
+    public SlangModule loadModule(String moduleName, String source) throws IOException {
+        byte[] nameUtf8 = moduleName.getBytes(StandardCharsets.UTF_8);
+        byte[] sourceUtf8 = source.getBytes(StandardCharsets.UTF_8);
+        long namePtr = allocAndWrite(instance, nameUtf8);
+        long sourcePtr = allocAndWrite(instance, sourceUtf8);
+
+        // Two adjacent 4-byte out-param slots for the load's diagnostics
+        // (ptr, len); slang_wasm_session_load_module writes into both,
+        // regardless of whether the load succeeds.
+        long diagOut = allocAndWrite(instance, new byte[8]);
+        long diagPtrAddr = diagOut;
+        long diagLenAddr = diagOut + 4;
+
+        long moduleHandle;
+        try {
+            moduleHandle = instance.export("slang_wasm_session_load_module").apply(
+                    sessionHandle,
+                    namePtr,   (long) nameUtf8.length,
+                    sourcePtr, (long) sourceUtf8.length,
+                    diagPtrAddr, diagLenAddr)[0];
+        } finally {
+            instance.export("slang_wasm_free").apply(namePtr);
+            instance.export("slang_wasm_free").apply(sourcePtr);
+        }
+
+        int diagPtr = readI32(diagPtrAddr);
+        int diagLen = readI32(diagLenAddr);
+        instance.export("slang_wasm_free").apply(diagOut);
+        String diagnostics = diagLen > 0 ? instance.memory().readString(diagPtr, diagLen) : "";
+        if (diagPtr != 0) {
+            instance.export("slang_wasm_free").apply((long) diagPtr);
+        }
+
+        if (moduleHandle == 0) {
+            throw new IOException(
+                    "slang_wasm_session_load_module returned 0 — failed to load module \""
+                    + moduleName + "\". Diagnostics:\n" + diagnostics);
+        }
+
+        return new SlangModule(moduleHandle, diagnostics);
+    }
+
+    /**
+     * A module parsed once via {@link #loadModule}, whose entry points can each
+     * be compiled independently (or all together, into one combined blob) without
+     * re-parsing the source. {@code AutoCloseable}: release with
+     * {@link #close()} once no more entry points need compiling.
+     */
+    public final class SlangModule implements AutoCloseable {
+        private final long handle;
+        private final String diagnostics;
+
+        private SlangModule(long handle, String diagnostics) {
+            this.handle = handle;
+            this.diagnostics = diagnostics;
+        }
+
+        /** Diagnostics (warnings) produced while loading this module. */
+        public String diagnostics() {
+            return diagnostics;
+        }
+
+        /** Names of the entry points (functions marked {@code [shader("...")]}) defined in this module. */
+        public List<String> entryPointNames() {
+            int count = (int) instance.export("slang_wasm_module_entry_point_count").apply(handle)[0];
+            List<String> names = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                int ptr = (int) instance.export("slang_wasm_module_entry_point_name_ptr")
+                        .apply(handle, (long) i)[0];
+                int len = (int) instance.export("slang_wasm_module_entry_point_name_len")
+                        .apply(handle, (long) i)[0];
+                names.add(len == 0 ? "" : instance.memory().readString(ptr, len));
+            }
+            return names;
+        }
+
+        /**
+         * Compile entry point {@code entryPoint} from this module, producing code
+         * for the target at {@code targetIndex}. Never throws for compile errors:
+         * errors are captured in the returned {@link CompileResult}.
+         */
+        public CompileResult compileEntryPoint(String entryPoint, int targetIndex) {
+            byte[] entryUtf8 = entryPoint.getBytes(StandardCharsets.UTF_8);
+            long entryPtr = allocAndWrite(instance, entryUtf8);
+            long resultHandle;
+            try {
+                resultHandle = instance.export("slang_wasm_compile_entry_point").apply(
+                        sessionHandle, handle, entryPtr, (long) entryUtf8.length, (long) targetIndex)[0];
+            } finally {
+                instance.export("slang_wasm_free").apply(entryPtr);
+            }
+            return readCompileResult(resultHandle, "slang_wasm_compile_entry_point");
+        }
+
+        /**
+         * Compile every entry point defined in this module together into one
+         * combined code blob for the target at {@code targetIndex} (e.g. one
+         * SPIR-V module containing both a vertex and a fragment entry point).
+         * Never throws for compile errors: errors are captured in the returned
+         * {@link CompileResult}.
+         */
+        public CompileResult compileAll(int targetIndex) {
+            long resultHandle = instance.export("slang_wasm_compile_module")
+                    .apply(sessionHandle, handle, (long) targetIndex)[0];
+            return readCompileResult(resultHandle, "slang_wasm_compile_module");
+        }
+
+        @Override
+        public void close() {
+            instance.export("slang_wasm_module_destroy").apply(handle);
         }
     }
 
@@ -381,5 +510,11 @@ public final class SlangCompiler implements AutoCloseable {
         int len = (int) instance.export(lenExport).apply(handle)[0];
         if (len == 0) return "";
         return instance.memory().readString(ptr, len);
+    }
+
+    /** Read a little-endian i32 out-param written by the WASM module at `addr`. */
+    private int readI32(long addr) {
+        byte[] b = instance.memory().readBytes((int) addr, 4);
+        return (b[0] & 0xFF) | ((b[1] & 0xFF) << 8) | ((b[2] & 0xFF) << 16) | ((b[3] & 0xFF) << 24);
     }
 }

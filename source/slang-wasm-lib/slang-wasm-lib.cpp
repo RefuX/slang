@@ -103,6 +103,18 @@ struct WasmResult
     std::string diagnostics;
 };
 
+// A module parsed once via slang_wasm_session_load_module, kept alive across
+// multiple independent compiles of its entry points. `session` is held so the
+// module's backing ISession cannot be destroyed out from under it even if the
+// caller destroys the session handle first.
+struct WasmModule
+{
+    ComPtr<slang::ISession> session;
+    slang::IModule* module = nullptr; // owned by `session`'s module cache, not by us
+    std::vector<ComPtr<slang::IEntryPoint>> entryPoints;
+    std::vector<std::string> entryPointNames;
+};
+
 // ── Global state ──────────────────────────────────────────────────────────────
 
 static ComPtr<slang::IGlobalSession> g_globalSession;
@@ -113,12 +125,14 @@ static std::unordered_map<uint32_t, WasmTargetList*> g_targetLists;
 static std::unordered_map<uint32_t, WasmMacroList*> g_macroLists;
 static std::unordered_map<uint32_t, WasmPathList*> g_pathLists;
 static std::unordered_map<uint32_t, WasmOptions*> g_optionLists;
+static std::unordered_map<uint32_t, WasmModule*> g_modules;
 static uint32_t g_nextSessionHandle = 1;
 static uint32_t g_nextResultHandle = 1;
 static uint32_t g_nextTargetListHandle = 1;
 static uint32_t g_nextMacroListHandle = 1;
 static uint32_t g_nextPathListHandle = 1;
 static uint32_t g_nextOptionsHandle = 1;
+static uint32_t g_nextModuleHandle = 1;
 
 // Insert `value` into `table` under a freshly allocated handle from `*nextHandle`.
 template<typename T>
@@ -166,6 +180,29 @@ static void appendBlob(std::string& out, slang::IBlob* blob)
         return;
     const char* ptr = static_cast<const char*>(blob->getBufferPointer());
     out.append(ptr, blob->getBufferSize());
+}
+
+// Copy `blob`'s contents into a freshly malloc'd buffer and write its
+// (ptr, len) into the caller-supplied out-params, or (0, 0) if `blob` is empty.
+// The buffer is owned by the caller of the function that took these out-params;
+// free it with slang_wasm_free. Used by APIs that can fail before producing a
+// handle to hang diagnostics off of (e.g. slang_wasm_session_load_module), so
+// diagnostics are not lost on a failed load.
+static void writeDiagOut(slang::IBlob* blob, uint32_t* diagPtrOut, uint32_t* diagLenOut)
+{
+    if (!diagPtrOut || !diagLenOut)
+        return;
+    if (!blob || blob->getBufferSize() == 0)
+    {
+        *diagPtrOut = 0;
+        *diagLenOut = 0;
+        return;
+    }
+    size_t size = blob->getBufferSize();
+    void* buf = malloc(size);
+    memcpy(buf, blob->getBufferPointer(), size);
+    *diagPtrOut = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(buf));
+    *diagLenOut = static_cast<uint32_t>(size);
 }
 
 // ── Memory helpers ────────────────────────────────────────────────────────────
@@ -466,7 +503,167 @@ extern "C" void slang_wasm_session_destroy(SlangWasmSession handle)
     g_sessions.erase(it);
 }
 
+// ── Modules ───────────────────────────────────────────────────────────────────
+
+extern "C" SlangWasmModule slang_wasm_session_load_module(
+    SlangWasmSession sessionHandle,
+    const char* name,
+    uint32_t nameLen,
+    const char* source,
+    uint32_t sourceLen,
+    uint32_t* diagPtrOut,
+    uint32_t* diagLenOut)
+{
+    try
+    {
+        auto sessionIt = g_sessions.find(sessionHandle);
+        WASM_ASSERT(sessionIt != g_sessions.end());
+        ComPtr<slang::ISession> session = sessionIt->second->session;
+
+        std::string nameStr(name, nameLen);
+        std::string sourceStr(source, sourceLen);
+
+        ComPtr<slang::IBlob> diagBlob;
+        slang::IModule* module = session->loadModuleFromSourceString(
+            nameStr.c_str(),
+            nameStr.c_str(), // use module name as path
+            sourceStr.c_str(),
+            diagBlob.writeRef());
+        writeDiagOut(diagBlob, diagPtrOut, diagLenOut);
+        if (!module)
+            return 0;
+
+        auto* wasmModule = new WasmModule();
+        wasmModule->session = session;
+        wasmModule->module = module;
+
+        SlangInt32 entryPointCount = module->getDefinedEntryPointCount();
+        for (SlangInt32 i = 0; i < entryPointCount; ++i)
+        {
+            ComPtr<slang::IEntryPoint> entryPoint;
+            if (SLANG_SUCCEEDED(module->getDefinedEntryPoint(i, entryPoint.writeRef())) &&
+                entryPoint)
+            {
+                wasmModule->entryPointNames.push_back(
+                    entryPoint->getFunctionReflection()->getName());
+                wasmModule->entryPoints.push_back(std::move(entryPoint));
+            }
+        }
+
+        return insertHandle(g_modules, &g_nextModuleHandle, wasmModule);
+    }
+    catch (...)
+    {
+        writeDiagOut(nullptr, diagPtrOut, diagLenOut);
+        return 0;
+    }
+}
+
+extern "C" void slang_wasm_module_destroy(SlangWasmModule handle)
+{
+    delete takeHandle(g_modules, handle);
+}
+
+extern "C" uint32_t slang_wasm_module_entry_point_count(SlangWasmModule handle)
+{
+    auto it = g_modules.find(handle);
+    WASM_ASSERT(it != g_modules.end());
+    return static_cast<uint32_t>(it->second->entryPointNames.size());
+}
+
+extern "C" uint32_t slang_wasm_module_entry_point_name_ptr(SlangWasmModule handle, uint32_t index)
+{
+    auto it = g_modules.find(handle);
+    WASM_ASSERT(it != g_modules.end());
+    WASM_ASSERT(index < it->second->entryPointNames.size());
+    return static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(it->second->entryPointNames[index].data()));
+}
+
+extern "C" uint32_t slang_wasm_module_entry_point_name_len(SlangWasmModule handle, uint32_t index)
+{
+    auto it = g_modules.find(handle);
+    WASM_ASSERT(it != g_modules.end());
+    WASM_ASSERT(index < it->second->entryPointNames.size());
+    return static_cast<uint32_t>(it->second->entryPointNames[index].size());
+}
+
 // ── Compilation ───────────────────────────────────────────────────────────────
+
+// Composite `components`, link, and produce code for the target at
+// `targetIndex` plus reflection JSON, writing into `result`. `useTargetCode`
+// selects IComponentType::getTargetCode (one combined blob covering every
+// entry point linked into the program — e.g. one SPIR-V module containing both
+// a vertex and a fragment entry point) over IComponentType::getEntryPointCode
+// (one blob for entry point index 0 only, the shape every caller needs when
+// compiling a single named entry point). Leaves result->succeeded false (with
+// diagnostics populated) on any failure; never throws.
+static void linkCompileAndReflect(
+    slang::ISession* session,
+    slang::IComponentType** components,
+    SlangInt componentCount,
+    uint32_t targetIndex,
+    bool useTargetCode,
+    WasmResult* result)
+{
+    ComPtr<slang::IComponentType> composite;
+    ComPtr<slang::IBlob> diagBlob;
+    SlangResult r = session->createCompositeComponentType(
+        components,
+        componentCount,
+        composite.writeRef(),
+        diagBlob.writeRef());
+    appendBlob(result->diagnostics, diagBlob);
+    if (SLANG_FAILED(r) || !composite)
+        return;
+
+    ComPtr<slang::IComponentType> linked;
+    diagBlob = nullptr;
+    r = composite->link(linked.writeRef(), diagBlob.writeRef());
+    appendBlob(result->diagnostics, diagBlob);
+    if (SLANG_FAILED(r) || !linked)
+        return;
+
+    // Get the compiled target code, for the target at `targetIndex` (its
+    // position in the SlangWasmTargetList the session was created with — 0 for
+    // the common single-target case).
+    ComPtr<slang::IBlob> codeBlob;
+    diagBlob = nullptr;
+    r = useTargetCode
+            ? linked->getTargetCode(
+                  static_cast<SlangInt>(targetIndex),
+                  codeBlob.writeRef(),
+                  diagBlob.writeRef())
+            : linked->getEntryPointCode(
+                  0,
+                  static_cast<SlangInt>(targetIndex),
+                  codeBlob.writeRef(),
+                  diagBlob.writeRef());
+    appendBlob(result->diagnostics, diagBlob);
+    if (SLANG_FAILED(r) || !codeBlob)
+        return;
+
+    const uint8_t* codePtr = static_cast<const uint8_t*>(codeBlob->getBufferPointer());
+    result->code.assign(codePtr, codePtr + codeBlob->getBufferSize());
+
+    // Serialize reflection to JSON.
+    diagBlob = nullptr;
+    slang::ProgramLayout* layout =
+        linked->getLayout(static_cast<SlangInt>(targetIndex), diagBlob.writeRef());
+    appendBlob(result->diagnostics, diagBlob);
+    if (layout)
+    {
+        ComPtr<slang::IBlob> jsonBlob;
+        r = spReflection_ToJson(
+            reinterpret_cast<SlangReflection*>(layout),
+            nullptr,
+            jsonBlob.writeRef());
+        if (SLANG_SUCCEEDED(r) && jsonBlob)
+            appendBlob(result->reflectionJson, jsonBlob);
+    }
+
+    result->succeeded = true;
+}
 
 extern "C" SlangWasmResult slang_wasm_compile(
     SlangWasmSession sessionHandle,
@@ -511,61 +708,91 @@ extern "C" SlangWasmResult slang_wasm_compile(
         if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
-        // Step 3: create a composite component type containing the module and entry point.
+        // Step 3: composite, link, get code, reflect.
         slang::IComponentType* components[] = {module, entryPoint.get()};
-        ComPtr<slang::IComponentType> composite;
-        diagBlob = nullptr;
-        r = session->createCompositeComponentType(
-            components,
-            2,
-            composite.writeRef(),
-            diagBlob.writeRef());
-        appendBlob(result->diagnostics, diagBlob);
-        if (SLANG_FAILED(r) || !composite)
+        linkCompileAndReflect(session, components, 2, targetIndex, false, result);
+        return resultHandle;
+    }
+    catch (...)
+    {
+        result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
+                               "compilation aborted.";
+        return resultHandle;
+    }
+}
+
+extern "C" SlangWasmResult slang_wasm_compile_entry_point(
+    SlangWasmSession sessionHandle,
+    SlangWasmModule moduleHandle,
+    const char* entryName,
+    uint32_t entryNameLen,
+    uint32_t targetIndex)
+{
+    auto* result = new WasmResult();
+    uint32_t resultHandle = g_nextResultHandle++;
+    g_results[resultHandle] = result;
+
+    try
+    {
+        auto sessionIt = g_sessions.find(sessionHandle);
+        WASM_ASSERT(sessionIt != g_sessions.end());
+        slang::ISession* session = sessionIt->second->session.get();
+
+        auto moduleIt = g_modules.find(moduleHandle);
+        WASM_ASSERT(moduleIt != g_modules.end());
+        slang::IModule* module = moduleIt->second->module;
+
+        std::string entryNameStr(entryName, entryNameLen);
+
+        ComPtr<slang::IEntryPoint> entryPoint;
+        SlangResult r =
+            module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
+        if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
-        // Step 4: link.
-        ComPtr<slang::IComponentType> linked;
-        diagBlob = nullptr;
-        r = composite->link(linked.writeRef(), diagBlob.writeRef());
-        appendBlob(result->diagnostics, diagBlob);
-        if (SLANG_FAILED(r) || !linked)
-            return resultHandle;
+        slang::IComponentType* components[] = {module, entryPoint.get()};
+        linkCompileAndReflect(session, components, 2, targetIndex, false, result);
+        return resultHandle;
+    }
+    catch (...)
+    {
+        result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
+                               "compilation aborted.";
+        return resultHandle;
+    }
+}
 
-        // Step 5: get the compiled target code, for the target at `targetIndex`
-        // (its position in the SlangWasmTargetList the session was created
-        // with — 0 for the common single-target case).
-        ComPtr<slang::IBlob> codeBlob;
-        diagBlob = nullptr;
-        r = linked->getEntryPointCode(
-            0,
-            static_cast<SlangInt>(targetIndex),
-            codeBlob.writeRef(),
-            diagBlob.writeRef());
-        appendBlob(result->diagnostics, diagBlob);
-        if (SLANG_FAILED(r) || !codeBlob)
-            return resultHandle;
+extern "C" SlangWasmResult slang_wasm_compile_module(
+    SlangWasmSession sessionHandle,
+    SlangWasmModule moduleHandle,
+    uint32_t targetIndex)
+{
+    auto* result = new WasmResult();
+    uint32_t resultHandle = g_nextResultHandle++;
+    g_results[resultHandle] = result;
 
-        const uint8_t* codePtr = static_cast<const uint8_t*>(codeBlob->getBufferPointer());
-        result->code.assign(codePtr, codePtr + codeBlob->getBufferSize());
+    try
+    {
+        auto sessionIt = g_sessions.find(sessionHandle);
+        WASM_ASSERT(sessionIt != g_sessions.end());
+        slang::ISession* session = sessionIt->second->session.get();
 
-        // Step 6: serialize reflection to JSON.
-        diagBlob = nullptr;
-        slang::ProgramLayout* layout =
-            linked->getLayout(static_cast<SlangInt>(targetIndex), diagBlob.writeRef());
-        appendBlob(result->diagnostics, diagBlob);
-        if (layout)
-        {
-            ComPtr<slang::IBlob> jsonBlob;
-            r = spReflection_ToJson(
-                reinterpret_cast<SlangReflection*>(layout),
-                nullptr,
-                jsonBlob.writeRef());
-            if (SLANG_SUCCEEDED(r) && jsonBlob)
-                appendBlob(result->reflectionJson, jsonBlob);
-        }
+        auto moduleIt = g_modules.find(moduleHandle);
+        WASM_ASSERT(moduleIt != g_modules.end());
+        WasmModule* wasmModule = moduleIt->second;
 
-        result->succeeded = true;
+        std::vector<slang::IComponentType*> components;
+        components.push_back(wasmModule->module);
+        for (auto& ep : wasmModule->entryPoints)
+            components.push_back(ep.get());
+
+        linkCompileAndReflect(
+            session,
+            components.data(),
+            static_cast<SlangInt>(components.size()),
+            targetIndex,
+            true,
+            result);
         return resultHandle;
     }
     catch (...)

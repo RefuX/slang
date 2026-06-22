@@ -7,6 +7,7 @@ import org.shaderslang.wasm.enums.CompilerOptionName;
 import org.shaderslang.wasm.enums.OptimizationLevel;
 import org.shaderslang.wasm.enums.Target;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -237,6 +238,70 @@ class SlangCompilerSmokeTest {
                     "Expected target index 1 (HLSL) to succeed. Diagnostics:\n"
                     + hlsl.diagnostics());
             assertTrue(hlsl.code().length > 0, "Expected non-empty HLSL source");
+        }
+    }
+
+    // ── Phase 7: module handles, multi-entry-point compilation ───────────────
+
+    private static final String VERT_FRAG_SHADER =
+            "[shader(\"vertex\")]\n"
+            + "float4 vert(float3 pos : POSITION) : SV_Position { return float4(pos, 1.0f); }\n"
+            + "[shader(\"fragment\")]\n"
+            + "float4 frag() : SV_Target { return float4(1.0f, 0.0f, 0.0f, 1.0f); }";
+
+    @Test
+    void moduleReportsEntryPointCountAndCompilesEachIndependently() throws Exception {
+        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+             var module = slang.loadModule("pipeline", VERT_FRAG_SHADER)) {
+
+            List<String> entryPoints = module.entryPointNames();
+            assertEquals(2, entryPoints.size(),
+                    "Expected two defined entry points, got: " + entryPoints);
+            assertTrue(entryPoints.contains("vert") && entryPoints.contains("frag"),
+                    "Expected entry points \"vert\" and \"frag\", got: " + entryPoints);
+
+            CompileResult vert = module.compileEntryPoint("vert", 0);
+            assertTrue(vert.succeeded(),
+                    "Expected \"vert\" to compile independently. Diagnostics:\n" + vert.diagnostics());
+            assertTrue(vert.code().length > 0, "Expected non-empty SPIR-V for \"vert\"");
+
+            CompileResult frag = module.compileEntryPoint("frag", 0);
+            assertTrue(frag.succeeded(),
+                    "Expected \"frag\" to compile independently. Diagnostics:\n" + frag.diagnostics());
+            assertTrue(frag.code().length > 0, "Expected non-empty SPIR-V for \"frag\"");
+        }
+    }
+
+    @Test
+    void compileAllProducesOneCombinedModule() throws Exception {
+        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+             var module = slang.loadModule("pipeline-combined", VERT_FRAG_SHADER)) {
+
+            CompileResult combined = module.compileAll(0);
+            assertTrue(combined.succeeded(),
+                    "Expected combined compile to succeed. Diagnostics:\n" + combined.diagnostics());
+
+            byte[] code = combined.code();
+            assertTrue(code.length >= 4, "SPIR-V output is shorter than 4 bytes");
+            int magic = ((code[0] & 0xFF))
+                      | ((code[1] & 0xFF) << 8)
+                      | ((code[2] & 0xFF) << 16)
+                      | ((code[3] & 0xFF) << 24);
+            assertEquals(0x07230203, magic, "First four bytes are not the SPIR-V magic number");
+
+            // Both entry point names should be discoverable in the combined module's reflection.
+            String json = combined.reflectionJson();
+            assertTrue(json.contains("\"vert\"") && json.contains("\"frag\""),
+                    "Expected reflection JSON to mention both entry points, got:\n" + json);
+        }
+    }
+
+    @Test
+    void loadModuleThrowsWithDiagnosticsOnBrokenSource() throws Exception {
+        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath)) {
+            Exception ex = assertThrows(IOException.class,
+                    () -> slang.loadModule("broken-module", "this is not valid slang syntax {{{"));
+            assertTrue(ex.getMessage().length() > 0, "Expected a non-empty exception message");
         }
     }
 
