@@ -113,9 +113,9 @@ public final class SlangCompiler implements AutoCloseable {
     /**
      * A specialization argument for a generic shader parameter (mirrors
      * SlangShaderSharp's {@code SpecializationArg}): either a concrete type name
-     * or a constant expression. Not yet consumed by any C ABI export — a
-     * Phase 11 prerequisite, recorded here so callers can start building
-     * specialization argument lists against a stable type.
+     * (resolved by name against the program's own layout, so it must be visible
+     * from the module being specialized) or a constant expression. Passed to
+     * {@link SlangModule#compileSpecialized}.
      */
     public static final class SpecializationArg {
         final boolean isType;
@@ -784,6 +784,54 @@ public final class SlangCompiler implements AutoCloseable {
          */
         public CompileResult compileAll(Target target) {
             return compileAll(targetIndexOf(target));
+        }
+
+        /**
+         * Specialize entry point {@code entryPoint} from this module with
+         * {@code args} (in argument-list order, matching the generic parameter
+         * declaration order), then link and compile for the target at
+         * {@code targetIndex}. Never throws for compile errors: errors are
+         * captured in the returned {@link CompileResult} (including an
+         * unresolvable type-name argument).
+         */
+        public CompileResult compileSpecialized(
+                String entryPoint, List<SpecializationArg> args, int targetIndex) {
+            byte[] entryUtf8 = entryPoint.getBytes(StandardCharsets.UTF_8);
+            long entryPtr = allocAndWrite(instance, entryUtf8);
+
+            long argsHandle = instance.export("slang_wasm_spec_args_create").apply()[0];
+            for (SpecializationArg arg : args) {
+                byte[] valueUtf8 = arg.value.getBytes(StandardCharsets.UTF_8);
+                long valuePtr = allocAndWrite(instance, valueUtf8);
+                String addExport = arg.isType
+                        ? "slang_wasm_spec_args_add_type"
+                        : "slang_wasm_spec_args_add_expr";
+                instance.export(addExport).apply(argsHandle, valuePtr, (long) valueUtf8.length);
+                instance.export("slang_wasm_free").apply(valuePtr);
+            }
+
+            long resultHandle;
+            try {
+                resultHandle = instance.export("slang_wasm_compile_specialized_entry_point").apply(
+                        sessionHandle, handle, entryPtr, (long) entryUtf8.length,
+                        argsHandle, (long) targetIndex)[0];
+            } finally {
+                instance.export("slang_wasm_free").apply(entryPtr);
+            }
+            return readCompileResult(resultHandle, "slang_wasm_compile_specialized_entry_point");
+        }
+
+        /**
+         * Specialize entry point {@code entryPoint} from this module with
+         * {@code args}, for {@code target} (resolved to its position among this
+         * session's configured targets).
+         *
+         * @throws IllegalArgumentException if {@code target} is not one of this
+         *                                  session's configured targets
+         */
+        public CompileResult compileSpecialized(
+                String entryPoint, List<SpecializationArg> args, Target target) {
+            return compileSpecialized(entryPoint, args, targetIndexOf(target));
         }
 
         /**

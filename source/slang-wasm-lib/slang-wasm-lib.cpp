@@ -105,6 +105,22 @@ struct WasmResult
     std::string diagnostics;
 };
 
+// One specialization argument, stored in raw form (resolved to an actual
+// slang::SpecializationArg only at use time, since a type-name argument needs
+// a ProgramLayout — only available once the entry point being specialized is
+// known — to resolve into a TypeReflection*).
+struct WasmSpecArgEntry
+{
+    bool isType; // true: `value` is a type name; false: `value` is an expression.
+    std::string value;
+};
+
+// Builder for a slang::SpecializationArg list.
+struct WasmSpecArgs
+{
+    std::vector<WasmSpecArgEntry> entries;
+};
+
 // A module parsed once via slang_wasm_session_load_module, kept alive across
 // multiple independent compiles of its entry points. `session` is held so the
 // module's backing ISession cannot be destroyed out from under it even if the
@@ -128,6 +144,7 @@ static std::unordered_map<uint32_t, WasmMacroList*> g_macroLists;
 static std::unordered_map<uint32_t, WasmPathList*> g_pathLists;
 static std::unordered_map<uint32_t, WasmOptions*> g_optionLists;
 static std::unordered_map<uint32_t, WasmModule*> g_modules;
+static std::unordered_map<uint32_t, WasmSpecArgs*> g_specArgsLists;
 static uint32_t g_nextSessionHandle = 1;
 static uint32_t g_nextResultHandle = 1;
 static uint32_t g_nextTargetListHandle = 1;
@@ -135,6 +152,7 @@ static uint32_t g_nextMacroListHandle = 1;
 static uint32_t g_nextPathListHandle = 1;
 static uint32_t g_nextOptionsHandle = 1;
 static uint32_t g_nextModuleHandle = 1;
+static uint32_t g_nextSpecArgsHandle = 1;
 
 // Insert `value` into `table` under a freshly allocated handle from `*nextHandle`.
 template<typename T>
@@ -205,6 +223,95 @@ static void writeDiagOut(slang::IBlob* blob, uint32_t* diagPtrOut, uint32_t* dia
     memcpy(buf, blob->getBufferPointer(), size);
     *diagPtrOut = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(buf));
     *diagLenOut = static_cast<uint32_t>(size);
+}
+
+// Link `unlinked`, then produce code for the target at `targetIndex` plus
+// reflection JSON, writing into `result`. Factored out of
+// linkCompileAndReflect (below) so a component type that doesn't need
+// compositing first — e.g. the result of IComponentType::specialize, which is
+// already a complete component type — can skip straight to this step.
+static void linkAndGetCode(
+    slang::IComponentType* unlinked,
+    uint32_t targetIndex,
+    bool useTargetCode,
+    WasmResult* result)
+{
+    ComPtr<slang::IComponentType> linked;
+    ComPtr<slang::IBlob> diagBlob;
+    SlangResult r = unlinked->link(linked.writeRef(), diagBlob.writeRef());
+    appendBlob(result->diagnostics, diagBlob);
+    if (SLANG_FAILED(r) || !linked)
+        return;
+
+    // Get the compiled target code, for the target at `targetIndex` (its
+    // position in the SlangWasmTargetList the session was created with — 0 for
+    // the common single-target case).
+    ComPtr<slang::IBlob> codeBlob;
+    diagBlob = nullptr;
+    r = useTargetCode
+            ? linked->getTargetCode(
+                  static_cast<SlangInt>(targetIndex),
+                  codeBlob.writeRef(),
+                  diagBlob.writeRef())
+            : linked->getEntryPointCode(
+                  0,
+                  static_cast<SlangInt>(targetIndex),
+                  codeBlob.writeRef(),
+                  diagBlob.writeRef());
+    appendBlob(result->diagnostics, diagBlob);
+    if (SLANG_FAILED(r) || !codeBlob)
+        return;
+
+    const uint8_t* codePtr = static_cast<const uint8_t*>(codeBlob->getBufferPointer());
+    result->code.assign(codePtr, codePtr + codeBlob->getBufferSize());
+
+    // Serialize reflection to JSON.
+    diagBlob = nullptr;
+    slang::ProgramLayout* layout =
+        linked->getLayout(static_cast<SlangInt>(targetIndex), diagBlob.writeRef());
+    appendBlob(result->diagnostics, diagBlob);
+    if (layout)
+    {
+        ComPtr<slang::IBlob> jsonBlob;
+        r = spReflection_ToJson(
+            reinterpret_cast<SlangReflection*>(layout),
+            nullptr,
+            jsonBlob.writeRef());
+        if (SLANG_SUCCEEDED(r) && jsonBlob)
+            appendBlob(result->reflectionJson, jsonBlob);
+    }
+
+    result->succeeded = true;
+}
+
+// Composite `components`, then link and produce code via linkAndGetCode.
+// `useTargetCode` selects IComponentType::getTargetCode (one combined blob
+// covering every entry point linked into the program — e.g. one SPIR-V module
+// containing both a vertex and a fragment entry point) over
+// IComponentType::getEntryPointCode (one blob for entry point index 0 only,
+// the shape every caller needs when compiling a single named entry point).
+// Leaves result->succeeded false (with diagnostics populated) on any failure;
+// never throws.
+static void linkCompileAndReflect(
+    slang::ISession* session,
+    slang::IComponentType** components,
+    SlangInt componentCount,
+    uint32_t targetIndex,
+    bool useTargetCode,
+    WasmResult* result)
+{
+    ComPtr<slang::IComponentType> composite;
+    ComPtr<slang::IBlob> diagBlob;
+    SlangResult r = session->createCompositeComponentType(
+        components,
+        componentCount,
+        composite.writeRef(),
+        diagBlob.writeRef());
+    appendBlob(result->diagnostics, diagBlob);
+    if (SLANG_FAILED(r) || !composite)
+        return;
+
+    linkAndGetCode(composite, targetIndex, useTargetCode, result);
 }
 
 // ── Memory helpers ────────────────────────────────────────────────────────────
@@ -668,82 +775,149 @@ extern "C" SlangWasmModule slang_wasm_session_load_module_ir(
     }
 }
 
-// ── Compilation ───────────────────────────────────────────────────────────────
+// ── Specialization ────────────────────────────────────────────────────────────
 
-// Composite `components`, link, and produce code for the target at
-// `targetIndex` plus reflection JSON, writing into `result`. `useTargetCode`
-// selects IComponentType::getTargetCode (one combined blob covering every
-// entry point linked into the program — e.g. one SPIR-V module containing both
-// a vertex and a fragment entry point) over IComponentType::getEntryPointCode
-// (one blob for entry point index 0 only, the shape every caller needs when
-// compiling a single named entry point). Leaves result->succeeded false (with
-// diagnostics populated) on any failure; never throws.
-static void linkCompileAndReflect(
-    slang::ISession* session,
-    slang::IComponentType** components,
-    SlangInt componentCount,
-    uint32_t targetIndex,
-    bool useTargetCode,
-    WasmResult* result)
+extern "C" SlangWasmSpecArgs slang_wasm_spec_args_create(void)
 {
-    ComPtr<slang::IComponentType> composite;
-    ComPtr<slang::IBlob> diagBlob;
-    SlangResult r = session->createCompositeComponentType(
-        components,
-        componentCount,
-        composite.writeRef(),
-        diagBlob.writeRef());
-    appendBlob(result->diagnostics, diagBlob);
-    if (SLANG_FAILED(r) || !composite)
-        return;
-
-    ComPtr<slang::IComponentType> linked;
-    diagBlob = nullptr;
-    r = composite->link(linked.writeRef(), diagBlob.writeRef());
-    appendBlob(result->diagnostics, diagBlob);
-    if (SLANG_FAILED(r) || !linked)
-        return;
-
-    // Get the compiled target code, for the target at `targetIndex` (its
-    // position in the SlangWasmTargetList the session was created with — 0 for
-    // the common single-target case).
-    ComPtr<slang::IBlob> codeBlob;
-    diagBlob = nullptr;
-    r = useTargetCode
-            ? linked->getTargetCode(
-                  static_cast<SlangInt>(targetIndex),
-                  codeBlob.writeRef(),
-                  diagBlob.writeRef())
-            : linked->getEntryPointCode(
-                  0,
-                  static_cast<SlangInt>(targetIndex),
-                  codeBlob.writeRef(),
-                  diagBlob.writeRef());
-    appendBlob(result->diagnostics, diagBlob);
-    if (SLANG_FAILED(r) || !codeBlob)
-        return;
-
-    const uint8_t* codePtr = static_cast<const uint8_t*>(codeBlob->getBufferPointer());
-    result->code.assign(codePtr, codePtr + codeBlob->getBufferSize());
-
-    // Serialize reflection to JSON.
-    diagBlob = nullptr;
-    slang::ProgramLayout* layout =
-        linked->getLayout(static_cast<SlangInt>(targetIndex), diagBlob.writeRef());
-    appendBlob(result->diagnostics, diagBlob);
-    if (layout)
-    {
-        ComPtr<slang::IBlob> jsonBlob;
-        r = spReflection_ToJson(
-            reinterpret_cast<SlangReflection*>(layout),
-            nullptr,
-            jsonBlob.writeRef());
-        if (SLANG_SUCCEEDED(r) && jsonBlob)
-            appendBlob(result->reflectionJson, jsonBlob);
-    }
-
-    result->succeeded = true;
+    return insertHandle(g_specArgsLists, &g_nextSpecArgsHandle, new WasmSpecArgs());
 }
+
+extern "C" void slang_wasm_spec_args_add_type(
+    SlangWasmSpecArgs argsHandle,
+    const char* typeName,
+    uint32_t typeNameLen)
+{
+    auto it = g_specArgsLists.find(argsHandle);
+    WASM_ASSERT(it != g_specArgsLists.end());
+    it->second->entries.push_back({true, std::string(typeName, typeNameLen)});
+}
+
+extern "C" void slang_wasm_spec_args_add_expr(
+    SlangWasmSpecArgs argsHandle,
+    const char* expr,
+    uint32_t exprLen)
+{
+    auto it = g_specArgsLists.find(argsHandle);
+    WASM_ASSERT(it != g_specArgsLists.end());
+    it->second->entries.push_back({false, std::string(expr, exprLen)});
+}
+
+extern "C" void slang_wasm_spec_args_destroy(SlangWasmSpecArgs handle)
+{
+    delete takeHandle(g_specArgsLists, handle);
+}
+
+extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
+    SlangWasmSession sessionHandle,
+    SlangWasmModule moduleHandle,
+    const char* entryName,
+    uint32_t entryNameLen,
+    SlangWasmSpecArgs specArgsHandle,
+    uint32_t targetIndex)
+{
+    auto* result = new WasmResult();
+    uint32_t resultHandle = g_nextResultHandle++;
+    g_results[resultHandle] = result;
+
+    // Consumed exactly once, on every return path.
+    std::unique_ptr<WasmSpecArgs> specArgs(takeHandle(g_specArgsLists, specArgsHandle));
+
+    try
+    {
+        auto sessionIt = g_sessions.find(sessionHandle);
+        WASM_ASSERT(sessionIt != g_sessions.end());
+        slang::ISession* session = sessionIt->second->session.get();
+
+        auto moduleIt = g_modules.find(moduleHandle);
+        WASM_ASSERT(moduleIt != g_modules.end());
+        slang::IModule* module = moduleIt->second->module;
+
+        std::string entryNameStr(entryName, entryNameLen);
+        ComPtr<slang::IEntryPoint> entryPoint;
+        SlangResult r =
+            module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
+        if (SLANG_FAILED(r) || !entryPoint)
+            return resultHandle;
+
+        slang::IComponentType* components[] = {module, entryPoint.get()};
+        ComPtr<slang::IComponentType> composite;
+        ComPtr<slang::IBlob> diagBlob;
+        r = session->createCompositeComponentType(
+            components,
+            2,
+            composite.writeRef(),
+            diagBlob.writeRef());
+        appendBlob(result->diagnostics, diagBlob);
+        if (SLANG_FAILED(r) || !composite)
+            return resultHandle;
+
+        // Resolve type-name specialization arguments against the composite's
+        // own program layout. This works even though the program may still
+        // have unresolved generic parameters of its own (that's the whole
+        // point of specializing) because findTypeByName is a global lookup
+        // by declared name, not dependent on those parameters being resolved.
+        slang::ProgramLayout* layout = nullptr;
+        bool needsLayout = false;
+        if (specArgs)
+        {
+            for (auto& entry : specArgs->entries)
+                needsLayout |= entry.isType;
+        }
+        if (needsLayout)
+        {
+            diagBlob = nullptr;
+            layout = composite->getLayout(static_cast<SlangInt>(targetIndex), diagBlob.writeRef());
+            appendBlob(result->diagnostics, diagBlob);
+        }
+
+        std::vector<slang::SpecializationArg> args;
+        if (specArgs)
+        {
+            args.reserve(specArgs->entries.size());
+            for (auto& entry : specArgs->entries)
+            {
+                if (entry.isType)
+                {
+                    slang::TypeReflection* type =
+                        layout ? layout->findTypeByName(entry.value.c_str()) : nullptr;
+                    if (!type)
+                    {
+                        result->diagnostics +=
+                            "\n[slang-wasm-lib] specialization type not found: " + entry.value;
+                        return resultHandle;
+                    }
+                    args.push_back(slang::SpecializationArg::fromType(type));
+                }
+                else
+                {
+                    args.push_back(slang::SpecializationArg::fromExpr(entry.value.c_str()));
+                }
+            }
+        }
+
+        ComPtr<slang::IComponentType> specialized;
+        diagBlob = nullptr;
+        r = composite->specialize(
+            args.data(),
+            static_cast<SlangInt>(args.size()),
+            specialized.writeRef(),
+            diagBlob.writeRef());
+        appendBlob(result->diagnostics, diagBlob);
+        if (SLANG_FAILED(r) || !specialized)
+            return resultHandle;
+
+        linkAndGetCode(specialized, targetIndex, false, result);
+        return resultHandle;
+    }
+    catch (...)
+    {
+        result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
+                               "specialization aborted.";
+        return resultHandle;
+    }
+}
+
+// ── Compilation ───────────────────────────────────────────────────────────────
 
 extern "C" SlangWasmResult slang_wasm_compile(
     SlangWasmSession sessionHandle,

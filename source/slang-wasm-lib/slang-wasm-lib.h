@@ -208,6 +208,45 @@ SlangWasmModule slang_wasm_session_load_module_ir(
     uint32_t* diagPtrOut,
     uint32_t* diagLenOut);
 
+// ── Specialization ────────────────────────────────────────────────────────────
+//
+// Specialize a generic shader for concrete types/values before compiling
+// (mirrors IComponentType::specialize). Type conformance / dynamic dispatch
+// (ISession::createTypeConformanceComponentType) and entry-point renaming
+// (IComponentType::renameEntryPoint) are deferred to a later phase — see
+// PLAN.md's Phase 11 completion notes for why.
+
+typedef uint32_t SlangWasmSpecArgs;
+
+// Create an empty list of specialization arguments.
+SlangWasmSpecArgs slang_wasm_spec_args_create(void);
+
+// Append a type argument (e.g. "PbrMaterial" for a `Renderer<T : IMaterial>`
+// generic parameter). Resolved by name against the program's own layout at
+// compile time, so the type must be visible from the module being compiled.
+void slang_wasm_spec_args_add_type(
+    SlangWasmSpecArgs args,
+    const char* typeName,
+    uint32_t typeNameLen);
+
+// Append a constant-expression argument (e.g. "4" for a generic value parameter).
+void slang_wasm_spec_args_add_expr(SlangWasmSpecArgs args, const char* expr, uint32_t exprLen);
+
+void slang_wasm_spec_args_destroy(SlangWasmSpecArgs args);
+
+// Find entry point `entryName` in `module`, specialize it with `args` (in
+// argument-list order, matching the generic parameter declaration order), then
+// link and compile for the target at `targetIndex`. Consumes (destroys) `args`
+// before returning, success or not. Never throws: internal aborts are caught
+// and returned as a failed result with diagnostics text.
+SlangWasmResult slang_wasm_compile_specialized_entry_point(
+    SlangWasmSession session,
+    SlangWasmModule module,
+    const char* entryName,
+    uint32_t entryNameLen,
+    SlangWasmSpecArgs args,
+    uint32_t targetIndex);
+
 // ── Compilation ───────────────────────────────────────────────────────────────
 
 // Compile `source` as module `moduleName`, find entry point `entryName`, link,

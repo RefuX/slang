@@ -16,6 +16,7 @@ import org.shaderslang.wasm.reflection.VariableLayoutReflection;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -448,6 +449,68 @@ class SlangCompilerSmokeTest {
                     + fromIr.diagnostics());
             assertArrayEquals(originalSpirv, fromIr.code(),
                     "Expected identical SPIR-V from the reloaded module");
+        }
+    }
+
+    // ── Phase 11: specialization ──────────────────────────────────────────────
+
+    @Test
+    void specializingGenericEntryPointProducesDistinctBinaries() throws Exception {
+        String source =
+            "interface IMaterial { float3 getColor(); }\n"
+            + "struct PbrMaterial : IMaterial { float3 getColor() { return float3(1.0f, 0.0f, 0.0f); } }\n"
+            + "struct UnlitMaterial : IMaterial { float3 getColor() { return float3(0.0f, 1.0f, 0.0f); } }\n"
+            + "RWStructuredBuffer<float3> output;\n"
+            + "[shader(\"compute\")] [numthreads(1,1,1)]\n"
+            + "void main<T : IMaterial>() {\n"
+            + "    T material;\n"
+            + "    output[0] = material.getColor();\n"
+            + "}";
+
+        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+             var module = slang.loadModule("generic-renderer", source)) {
+
+            CompileResult pbr = module.compileSpecialized(
+                    "main", List.of(SlangCompiler.SpecializationArg.fromType("PbrMaterial")), 0);
+            assertTrue(pbr.succeeded(),
+                    "Expected PbrMaterial specialization to succeed. Diagnostics:\n"
+                    + pbr.diagnostics());
+            assertTrue(pbr.code().length > 0, "Expected non-empty SPIR-V for PbrMaterial");
+
+            CompileResult unlit = module.compileSpecialized(
+                    "main", List.of(SlangCompiler.SpecializationArg.fromType("UnlitMaterial")), 0);
+            assertTrue(unlit.succeeded(),
+                    "Expected UnlitMaterial specialization to succeed. Diagnostics:\n"
+                    + unlit.diagnostics());
+            assertTrue(unlit.code().length > 0, "Expected non-empty SPIR-V for UnlitMaterial");
+
+            assertFalse(Arrays.equals(pbr.code(), unlit.code()),
+                    "Expected PbrMaterial and UnlitMaterial specializations to produce "
+                    + "distinct SPIR-V binaries");
+        }
+    }
+
+    @Test
+    void specializingWithUnresolvableTypeNameFails() throws Exception {
+        String source =
+            "interface IMaterial { float3 getColor(); }\n"
+            + "RWStructuredBuffer<float3> output;\n"
+            + "[shader(\"compute\")] [numthreads(1,1,1)]\n"
+            + "void main<T : IMaterial>() {\n"
+            + "    T material;\n"
+            + "    output[0] = material.getColor();\n"
+            + "}";
+
+        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+             var module = slang.loadModule("generic-renderer-bad", source)) {
+
+            CompileResult result = module.compileSpecialized(
+                    "main", List.of(SlangCompiler.SpecializationArg.fromType("NoSuchMaterial")), 0);
+            assertFalse(result.succeeded(),
+                    "Expected specialization with an unresolvable type name to fail");
+            assertTrue(result.diagnostics().contains("NoSuchMaterial"),
+                    "Expected diagnostics to mention the unresolved type name. Diagnostics:\n"
+                    + result.diagnostics());
         }
     }
 

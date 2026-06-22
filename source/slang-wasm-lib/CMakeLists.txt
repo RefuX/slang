@@ -109,6 +109,12 @@ target_link_options(
         # module serialisation exports (Phase 10).
         -Wl,--export=slang_wasm_module_serialize
         -Wl,--export=slang_wasm_session_load_module_ir
+        # specialization exports (Phase 11).
+        -Wl,--export=slang_wasm_spec_args_create
+        -Wl,--export=slang_wasm_spec_args_add_type
+        -Wl,--export=slang_wasm_spec_args_add_expr
+        -Wl,--export=slang_wasm_spec_args_destroy
+        -Wl,--export=slang_wasm_compile_specialized_entry_point
         -Wl,--export=slang_wasm_result_succeeded
         -Wl,--export=slang_wasm_result_code_ptr
         -Wl,--export=slang_wasm_result_code_len
