@@ -5,7 +5,13 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.shaderslang.wasm.enums.CompilerOptionName;
 import org.shaderslang.wasm.enums.OptimizationLevel;
+import org.shaderslang.wasm.enums.ParameterCategory;
 import org.shaderslang.wasm.enums.Target;
+import org.shaderslang.wasm.enums.TypeKind;
+import org.shaderslang.wasm.reflection.EntryPointReflection;
+import org.shaderslang.wasm.reflection.ShaderReflection;
+import org.shaderslang.wasm.reflection.TypeLayoutReflection;
+import org.shaderslang.wasm.reflection.VariableLayoutReflection;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -351,6 +357,56 @@ class SlangCompilerSmokeTest {
                 .build()) {
             assertThrows(IllegalArgumentException.class,
                     () -> slang.compile("x", TRIVIAL_SHADER, "main", Target.HLSL));
+        }
+    }
+
+    // typed reflection model ────────────────────────────────────────
+
+    @Test
+    void typedReflectionReportsConstantBufferBindingAndFields() throws Exception {
+        String source =
+            "struct MyStruct {\n"
+            + "    float3 color;\n"
+            + "    int count;\n"
+            + "    float2 offset;\n"
+            + "};\n"
+            + "ConstantBuffer<MyStruct> gCB;\n"
+            + "RWStructuredBuffer<float> output;\n"
+            + "[shader(\"compute\")] [numthreads(1,1,1)]\n"
+            + "void main() { output[0] = gCB.color.x + gCB.count + gCB.offset.x; }";
+
+        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath)) {
+            CompileResult result = slang.compile("typed-reflection", source, "main");
+            assertTrue(result.succeeded(),
+                    "Expected compilation to succeed. Diagnostics:\n" + result.diagnostics());
+
+            ShaderReflection reflection = ShaderReflection.parse(result.reflectionJson());
+
+            VariableLayoutReflection gcb = reflection.parameters().stream()
+                    .filter(p -> "gCB".equals(p.name()))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("Expected a parameter named \"gCB\""));
+
+            // On SPIR-V (Vulkan), a ConstantBuffer<T> parameter binds via a generic descriptor
+            // table slot rather than the HLSL-register-specific "constantBuffer" category;
+            // both are the binding kind a real caller for this target should expect.
+            assertTrue(
+                    gcb.bindingCategory() == ParameterCategory.CONSTANT_BUFFER
+                    || gcb.bindingCategory() == ParameterCategory.DESCRIPTOR_TABLE_SLOT,
+                    "Expected gCB to bind as a constant buffer or descriptor table slot, got: "
+                    + gcb.bindingCategory());
+            assertTrue(gcb.bindingIndex() >= 0, "Expected a non-negative binding index");
+            assertTrue(gcb.bindingSpace() >= 0, "Expected a non-negative binding space");
+
+            TypeLayoutReflection myStruct = gcb.typeLayout().elementType();
+            assertEquals(TypeKind.STRUCT, myStruct.kind(), "Expected gCB's element type to be a struct");
+            assertEquals("MyStruct", myStruct.name());
+            assertEquals(List.of("color", "count", "offset"), myStruct.fieldNames());
+
+            EntryPointReflection main = reflection.entryPoint("main")
+                    .orElseThrow(() -> new AssertionError("Expected entry point \"main\""));
+            assertEquals(org.shaderslang.wasm.enums.Stage.COMPUTE, main.stage());
+            assertArrayEquals(new int[] {1, 1, 1}, main.threadGroupSize());
         }
     }
 
