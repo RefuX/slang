@@ -152,6 +152,10 @@ void slang_wasm_session_destroy(SlangWasmSession session);
 // discards a module in one call.
 
 typedef uint32_t SlangWasmModule;
+// Forward declaration: SlangWasmResult is defined fully in the "Compilation"
+// section below, but slang_wasm_module_serialize (a module-handle operation)
+// needs the type here too.
+typedef uint32_t SlangWasmResult;
 
 // Load `source` as module `name` into `session` (mirrors
 // ISession::loadModuleFromSourceString). Returns 0 on failure. `diagPtrOut`/
@@ -184,9 +188,27 @@ uint32_t slang_wasm_module_entry_point_count(SlangWasmModule module);
 uint32_t slang_wasm_module_entry_point_name_ptr(SlangWasmModule module, uint32_t index);
 uint32_t slang_wasm_module_entry_point_name_len(SlangWasmModule module, uint32_t index);
 
-// ── Compilation ───────────────────────────────────────────────────────────────
+// Serialise `module`'s checked IR to a precompiled binary blob (mirrors
+// IModule::serialize), so it can be cached and reloaded later via
+// slang_wasm_session_load_module_ir without re-parsing or re-checking the
+// original source. On success, the result's code_ptr/code_len (see the result
+// accessors below) hold the IR bytes; reflection_json/diagnostics are unused.
+// Never throws.
+SlangWasmResult slang_wasm_module_serialize(SlangWasmModule module);
 
-typedef uint32_t SlangWasmResult;
+// Load a precompiled IR blob (as produced by slang_wasm_module_serialize) back
+// as a module (mirrors ISession::loadModuleFromIRBlob). Returns 0 on failure.
+// `diagPtrOut`/`diagLenOut` behave exactly as in slang_wasm_session_load_module.
+SlangWasmModule slang_wasm_session_load_module_ir(
+    SlangWasmSession session,
+    const char* name,
+    uint32_t nameLen,
+    const void* irBlob,
+    uint32_t irLen,
+    uint32_t* diagPtrOut,
+    uint32_t* diagLenOut);
+
+// ── Compilation ───────────────────────────────────────────────────────────────
 
 // Compile `source` as module `moduleName`, find entry point `entryName`, link,
 // and produce code for the target at `targetIndex` (its position in the

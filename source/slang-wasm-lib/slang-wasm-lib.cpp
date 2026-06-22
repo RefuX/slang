@@ -19,6 +19,8 @@
 #include <slang-com-ptr.h>
 #include <slang-deprecated.h>
 
+#include "../core/slang-blob.h"
+
 #include <cassert>
 #include <cctype>
 #include <cstdlib>
@@ -505,6 +507,31 @@ extern "C" void slang_wasm_session_destroy(SlangWasmSession handle)
 
 // ── Modules ───────────────────────────────────────────────────────────────────
 
+// Wrap a freshly loaded `module` (from any ISession load entry point: source
+// string, IR blob, ...) in a handle, caching its defined entry points up
+// front. Shared by slang_wasm_session_load_module and
+// slang_wasm_session_load_module_ir so the entry-point enumeration logic has
+// one definition.
+static SlangWasmModule makeWasmModule(ComPtr<slang::ISession> session, slang::IModule* module)
+{
+    auto* wasmModule = new WasmModule();
+    wasmModule->session = session;
+    wasmModule->module = module;
+
+    SlangInt32 entryPointCount = module->getDefinedEntryPointCount();
+    for (SlangInt32 i = 0; i < entryPointCount; ++i)
+    {
+        ComPtr<slang::IEntryPoint> entryPoint;
+        if (SLANG_SUCCEEDED(module->getDefinedEntryPoint(i, entryPoint.writeRef())) && entryPoint)
+        {
+            wasmModule->entryPointNames.push_back(entryPoint->getFunctionReflection()->getName());
+            wasmModule->entryPoints.push_back(std::move(entryPoint));
+        }
+    }
+
+    return insertHandle(g_modules, &g_nextModuleHandle, wasmModule);
+}
+
 extern "C" SlangWasmModule slang_wasm_session_load_module(
     SlangWasmSession sessionHandle,
     const char* name,
@@ -533,24 +560,7 @@ extern "C" SlangWasmModule slang_wasm_session_load_module(
         if (!module)
             return 0;
 
-        auto* wasmModule = new WasmModule();
-        wasmModule->session = session;
-        wasmModule->module = module;
-
-        SlangInt32 entryPointCount = module->getDefinedEntryPointCount();
-        for (SlangInt32 i = 0; i < entryPointCount; ++i)
-        {
-            ComPtr<slang::IEntryPoint> entryPoint;
-            if (SLANG_SUCCEEDED(module->getDefinedEntryPoint(i, entryPoint.writeRef())) &&
-                entryPoint)
-            {
-                wasmModule->entryPointNames.push_back(
-                    entryPoint->getFunctionReflection()->getName());
-                wasmModule->entryPoints.push_back(std::move(entryPoint));
-            }
-        }
-
-        return insertHandle(g_modules, &g_nextModuleHandle, wasmModule);
+        return makeWasmModule(session, module);
     }
     catch (...)
     {
@@ -586,6 +596,76 @@ extern "C" uint32_t slang_wasm_module_entry_point_name_len(SlangWasmModule handl
     WASM_ASSERT(it != g_modules.end());
     WASM_ASSERT(index < it->second->entryPointNames.size());
     return static_cast<uint32_t>(it->second->entryPointNames[index].size());
+}
+
+extern "C" SlangWasmResult slang_wasm_module_serialize(SlangWasmModule moduleHandle)
+{
+    auto* result = new WasmResult();
+    uint32_t resultHandle = g_nextResultHandle++;
+    g_results[resultHandle] = result;
+
+    try
+    {
+        auto moduleIt = g_modules.find(moduleHandle);
+        WASM_ASSERT(moduleIt != g_modules.end());
+        slang::IModule* module = moduleIt->second->module;
+
+        ComPtr<slang::IBlob> irBlob;
+        SlangResult r = module->serialize(irBlob.writeRef());
+        if (SLANG_FAILED(r) || !irBlob)
+        {
+            result->diagnostics = "[slang-wasm-lib] IModule::serialize failed";
+            return resultHandle;
+        }
+
+        const uint8_t* irPtr = static_cast<const uint8_t*>(irBlob->getBufferPointer());
+        result->code.assign(irPtr, irPtr + irBlob->getBufferSize());
+        result->succeeded = true;
+        return resultHandle;
+    }
+    catch (...)
+    {
+        result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
+                               "module serialization aborted.";
+        return resultHandle;
+    }
+}
+
+extern "C" SlangWasmModule slang_wasm_session_load_module_ir(
+    SlangWasmSession sessionHandle,
+    const char* name,
+    uint32_t nameLen,
+    const void* irBlob,
+    uint32_t irLen,
+    uint32_t* diagPtrOut,
+    uint32_t* diagLenOut)
+{
+    try
+    {
+        auto sessionIt = g_sessions.find(sessionHandle);
+        WASM_ASSERT(sessionIt != g_sessions.end());
+        ComPtr<slang::ISession> session = sessionIt->second->session;
+
+        std::string nameStr(name, nameLen);
+        ComPtr<slang::IBlob> sourceBlob = Slang::RawBlob::create(irBlob, irLen);
+
+        ComPtr<slang::IBlob> diagBlob;
+        slang::IModule* module = session->loadModuleFromIRBlob(
+            nameStr.c_str(),
+            nameStr.c_str(), // use module name as path
+            sourceBlob,
+            diagBlob.writeRef());
+        writeDiagOut(diagBlob, diagPtrOut, diagLenOut);
+        if (!module)
+            return 0;
+
+        return makeWasmModule(session, module);
+    }
+    catch (...)
+    {
+        writeDiagOut(nullptr, diagPtrOut, diagLenOut);
+        return 0;
+    }
 }
 
 // ── Compilation ───────────────────────────────────────────────────────────────

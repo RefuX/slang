@@ -106,6 +106,9 @@ target_link_options(
         -Wl,--export=slang_wasm_module_entry_point_name_len
         -Wl,--export=slang_wasm_compile_entry_point
         -Wl,--export=slang_wasm_compile_module
+        # module serialisation exports (Phase 10).
+        -Wl,--export=slang_wasm_module_serialize
+        -Wl,--export=slang_wasm_session_load_module_ir
         -Wl,--export=slang_wasm_result_succeeded
         -Wl,--export=slang_wasm_result_code_ptr
         -Wl,--export=slang_wasm_result_code_len

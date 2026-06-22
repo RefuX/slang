@@ -629,13 +629,7 @@ public final class SlangCompiler implements AutoCloseable {
             instance.export("slang_wasm_free").apply(sourcePtr);
         }
 
-        int diagPtr = readI32(diagPtrAddr);
-        int diagLen = readI32(diagLenAddr);
-        instance.export("slang_wasm_free").apply(diagOut);
-        String diagnostics = diagLen > 0 ? instance.memory().readString(diagPtr, diagLen) : "";
-        if (diagPtr != 0) {
-            instance.export("slang_wasm_free").apply((long) diagPtr);
-        }
+        String diagnostics = readAndFreeDiagOut(diagOut);
 
         if (moduleHandle == 0) {
             throw new IOException(
@@ -644,6 +638,64 @@ public final class SlangCompiler implements AutoCloseable {
         }
 
         return new SlangModule(moduleHandle, diagnostics);
+    }
+
+    /**
+     * Load a module from a precompiled IR blob (as produced by {@link
+     * SlangModule#serialize()} in an earlier session), skipping re-parsing and
+     * re-checking the original source. {@code moduleName} need not match the
+     * name the module was originally loaded under.
+     *
+     * @throws IOException if the IR blob fails to load (e.g. it was produced
+     *                      by an incompatible Slang build); the exception
+     *                      message includes the diagnostics text
+     */
+    public SlangModule loadModuleFromIr(String moduleName, byte[] ir) throws IOException {
+        byte[] nameUtf8 = moduleName.getBytes(StandardCharsets.UTF_8);
+        long namePtr = allocAndWrite(instance, nameUtf8);
+        long irPtr = allocAndWrite(instance, ir);
+
+        long diagOut = allocAndWrite(instance, new byte[8]);
+        long diagPtrAddr = diagOut;
+        long diagLenAddr = diagOut + 4;
+
+        long moduleHandle;
+        try {
+            moduleHandle = instance.export("slang_wasm_session_load_module_ir").apply(
+                    sessionHandle,
+                    namePtr, (long) nameUtf8.length,
+                    irPtr,   (long) ir.length,
+                    diagPtrAddr, diagLenAddr)[0];
+        } finally {
+            instance.export("slang_wasm_free").apply(namePtr);
+            instance.export("slang_wasm_free").apply(irPtr);
+        }
+
+        String diagnostics = readAndFreeDiagOut(diagOut);
+
+        if (moduleHandle == 0) {
+            throw new IOException(
+                    "slang_wasm_session_load_module_ir returned 0 — failed to load module \""
+                    + moduleName + "\" from IR. Diagnostics:\n" + diagnostics);
+        }
+
+        return new SlangModule(moduleHandle, diagnostics);
+    }
+
+    /**
+     * Read the (ptr, len) diagnostics pair written by a load function at the two adjacent
+     * 4-byte out-param slots starting at {@code diagOut}, then free both that scratch
+     * allocation and (if non-null) the diagnostics buffer itself.
+     */
+    private String readAndFreeDiagOut(long diagOut) {
+        int diagPtr = readI32(diagOut);
+        int diagLen = readI32(diagOut + 4);
+        instance.export("slang_wasm_free").apply(diagOut);
+        String diagnostics = diagLen > 0 ? instance.memory().readString(diagPtr, diagLen) : "";
+        if (diagPtr != 0) {
+            instance.export("slang_wasm_free").apply((long) diagPtr);
+        }
+        return diagnostics;
     }
 
     /**
@@ -732,6 +784,24 @@ public final class SlangCompiler implements AutoCloseable {
          */
         public CompileResult compileAll(Target target) {
             return compileAll(targetIndexOf(target));
+        }
+
+        /**
+         * Serialise this module's checked IR to bytes, for later reloading via
+         * {@link SlangCompiler#loadModuleFromIr} (in this session or a later
+         * one) without re-parsing or re-checking the original source.
+         *
+         * @throws IOException if serialization fails; the exception message
+         *                      includes the diagnostics text
+         */
+        public byte[] serialize() throws IOException {
+            long resultHandle = instance.export("slang_wasm_module_serialize").apply(handle)[0];
+            CompileResult result = readCompileResult(resultHandle, "slang_wasm_module_serialize");
+            if (!result.succeeded()) {
+                throw new IOException(
+                        "slang_wasm_module_serialize failed. Diagnostics:\n" + result.diagnostics());
+            }
+            return result.code();
         }
 
         @Override

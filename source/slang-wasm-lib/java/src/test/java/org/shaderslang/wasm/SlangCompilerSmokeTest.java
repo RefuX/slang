@@ -410,6 +410,47 @@ class SlangCompilerSmokeTest {
         }
     }
 
+    // module serialisation (precompiled IR) ──────────────────────
+
+    @Test
+    void serializedModuleRoundTripsToIdenticalCode() throws Exception {
+        byte[] ir;
+        byte[] originalSpirv;
+
+        // One WASM instance per module load (~20 MB); serialize and close this
+        // instance before opening the second one for the reload, to stay within
+        // the test JVM's heap (see macroDefineChangesCompiledOutput).
+        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+             var module = slang.loadModule("serialize-me", TRIVIAL_SHADER)) {
+            CompileResult original = module.compileEntryPoint("main", 0);
+            assertTrue(original.succeeded(),
+                    "Expected the original compile to succeed. Diagnostics:\n"
+                    + original.diagnostics());
+            originalSpirv = original.code();
+
+            ir = module.serialize();
+            assertTrue(ir.length > 0, "Expected non-empty serialized IR");
+        }
+
+        // Reload from IR in a brand new instance and session — proving the IR
+        // is genuinely self-contained, not relying on anything left over from
+        // the session that produced it.
+        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+             var reloaded = slang.loadModuleFromIr("reloaded", ir)) {
+
+            List<String> entryPoints = reloaded.entryPointNames();
+            assertTrue(entryPoints.contains("main"),
+                    "Expected the reloaded module to still define \"main\", got: " + entryPoints);
+
+            CompileResult fromIr = reloaded.compileEntryPoint("main", 0);
+            assertTrue(fromIr.succeeded(),
+                    "Expected the reloaded module to compile successfully. Diagnostics:\n"
+                    + fromIr.diagnostics());
+            assertArrayEquals(originalSpirv, fromIr.code(),
+                    "Expected identical SPIR-V from the reloaded module");
+        }
+    }
+
     // ── Version sanity check ──────────────────────────────────────────────────
 
     @Test
