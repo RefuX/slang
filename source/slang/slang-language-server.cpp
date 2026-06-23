@@ -83,7 +83,13 @@ slang::IGlobalSession* LanguageServerCore::getOrCreateGlobalSession()
     {
         // Just create the global session in the regular way if there isn't one set
         SlangGlobalSessionDesc desc = {};
+#if !SLANG_WASM
+        // On WASI there is no dlopen()-able GLSL module DLL and no writable on-disk
+        // cache directory available before the workspace preopen is known, so
+        // slang_createGlobalSessionImpl's enableGLSL path always falls through to
+        // compiling the GLSL standard module from source on every session creation.
         desc.enableGLSL = true;
+#endif
         if (SLANG_FAILED(slang_createGlobalSession2(&desc, m_session.writeRef())))
         {
             return nullptr;
