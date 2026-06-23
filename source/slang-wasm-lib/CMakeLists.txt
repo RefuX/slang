@@ -83,8 +83,7 @@ target_link_options(
     slang-wasm-lib
     PRIVATE
         # Reactor: link crt1-reactor.o which provides _initialize (calls
-        # __wasm_call_ctors) and emits no WASM start section. This matches
-        # the pattern validated in phase0/spike.cpp.
+        # __wasm_call_ctors) and emits no WASM start section.
         -mexec-model=reactor
         # Large stack: Slang's AST/IR passes recurse deeply. 8 MB avoids stack traps.
         -Wl,-z,stack-size=8388608
