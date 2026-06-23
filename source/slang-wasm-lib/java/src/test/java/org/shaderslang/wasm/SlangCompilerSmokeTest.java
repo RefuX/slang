@@ -3,6 +3,8 @@ package org.shaderslang.wasm;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.shaderslang.wasm.diagnostics.Diagnostic;
+import org.shaderslang.wasm.diagnostics.DiagnosticList;
 import org.shaderslang.wasm.enums.CompilerOptionName;
 import org.shaderslang.wasm.enums.OptimizationLevel;
 import org.shaderslang.wasm.enums.ParameterCategory;
@@ -547,6 +549,40 @@ class SlangCompilerSmokeTest {
 
             assertTrue(moduleDecl.child(DeclReflection.Kind.FUNCTION, "main").isPresent(),
                     "Expected a FUNCTION child named \"main\"");
+        }
+    }
+
+    // ── Phase 13: disassembly + structured diagnostics ───────────────────────
+
+    @Test
+    void disassembleProducesNonEmptyIrText() throws Exception {
+        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+             var module = slang.loadModule("disasm-me", TRIVIAL_SHADER)) {
+            String disasm = module.disassemble();
+            assertFalse(disasm.isEmpty(), "Expected non-empty disassembly text");
+            assertTrue(disasm.contains("main"),
+                    "Expected disassembly to mention the entry point name. Got:\n" + disasm);
+        }
+    }
+
+    @Test
+    void diagnosticListParsesBrokenShaderError() throws Exception {
+        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath)) {
+            CompileResult bad = slang.compile("broken-for-diagnostics",
+                    "void main() { undefinedFunction(); }", "main");
+            assertFalse(bad.succeeded(), "Expected compilation of broken shader to fail");
+
+            DiagnosticList diagnostics = DiagnosticList.parse(bad.diagnostics());
+            assertTrue(diagnostics.hasErrors(), "Expected at least one error-or-worse diagnostic");
+
+            Diagnostic error = diagnostics.diagnostics().stream()
+                    .filter(d -> d.severity() == Diagnostic.Severity.ERROR)
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError(
+                            "Expected an ERROR-severity diagnostic, got: " + diagnostics.diagnostics()));
+
+            assertEquals("E30015", error.code());
+            assertEquals(1, error.line(), "Expected the error to point at source line 1");
         }
     }
 

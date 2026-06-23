@@ -1025,6 +1025,38 @@ extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModul
     }
 }
 
+extern "C" SlangWasmResult slang_wasm_module_disassemble(SlangWasmModule moduleHandle)
+{
+    auto* result = new WasmResult();
+    uint32_t resultHandle = g_nextResultHandle++;
+    g_results[resultHandle] = result;
+
+    try
+    {
+        auto moduleIt = g_modules.find(moduleHandle);
+        WASM_ASSERT(moduleIt != g_modules.end());
+        slang::IModule* module = moduleIt->second->module;
+
+        ComPtr<slang::IBlob> disasmBlob;
+        SlangResult r = module->disassemble(disasmBlob.writeRef());
+        if (SLANG_FAILED(r) || !disasmBlob)
+        {
+            result->diagnostics = "[slang-wasm-lib] IModule::disassemble failed";
+            return resultHandle;
+        }
+
+        appendBlob(result->diagnostics, disasmBlob);
+        result->succeeded = true;
+        return resultHandle;
+    }
+    catch (...)
+    {
+        result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
+                               "disassembly aborted.";
+        return resultHandle;
+    }
+}
+
 // ── Compilation ───────────────────────────────────────────────────────────────
 
 extern "C" SlangWasmResult slang_wasm_compile(

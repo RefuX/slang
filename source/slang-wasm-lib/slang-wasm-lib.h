@@ -257,6 +257,13 @@ SlangWasmResult slang_wasm_compile_specialized_entry_point(
 // success. Never throws.
 SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModule module);
 
+// Disassemble `module`'s checked IR to human-readable text (mirrors
+// IModule::disassemble). On success, the result's diagnostics_ptr/len (see the
+// result accessors below) hold the disassembly text — reusing that field for
+// "the text I asked for" rather than adding a fifth WasmResult field for one
+// caller; code/reflection_json are unused. Never throws.
+SlangWasmResult slang_wasm_module_disassemble(SlangWasmModule module);
+
 // ── Compilation ───────────────────────────────────────────────────────────────
 
 // Compile `source` as module `moduleName`, find entry point `entryName`, link,

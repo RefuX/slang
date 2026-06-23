@@ -874,6 +874,25 @@ public final class SlangCompiler implements AutoCloseable {
             return result.reflectionJson();
         }
 
+        /**
+         * Disassemble this module's checked IR to human-readable text.
+         *
+         * @throws IOException if disassembly fails; the exception message
+         *                      includes the diagnostics text
+         */
+        public String disassemble() throws IOException {
+            long resultHandle = instance.export("slang_wasm_module_disassemble").apply(handle)[0];
+            CompileResult result = readCompileResult(resultHandle, "slang_wasm_module_disassemble");
+            if (!result.succeeded()) {
+                throw new IOException(
+                        "slang_wasm_module_disassemble failed. Diagnostics:\n"
+                        + result.diagnostics());
+            }
+            // The C ABI reuses the diagnostics field to carry disassembly text
+            // (see slang-wasm-lib.h) — translate that back to a sensible name here.
+            return result.diagnostics();
+        }
+
         @Override
         public void close() {
             instance.export("slang_wasm_module_destroy").apply(handle);

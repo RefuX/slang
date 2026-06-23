@@ -117,6 +117,8 @@ target_link_options(
         -Wl,--export=slang_wasm_compile_specialized_entry_point
         # declaration reflection exports (Phase 12).
         -Wl,--export=slang_wasm_module_decl_reflection_json
+        # disassembly export (Phase 13).
+        -Wl,--export=slang_wasm_module_disassemble
         -Wl,--export=slang_wasm_result_succeeded
         -Wl,--export=slang_wasm_result_code_ptr
         -Wl,--export=slang_wasm_result_code_len
