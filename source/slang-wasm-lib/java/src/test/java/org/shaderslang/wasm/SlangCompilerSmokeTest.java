@@ -8,6 +8,7 @@ import org.shaderslang.wasm.enums.OptimizationLevel;
 import org.shaderslang.wasm.enums.ParameterCategory;
 import org.shaderslang.wasm.enums.Target;
 import org.shaderslang.wasm.enums.TypeKind;
+import org.shaderslang.wasm.reflection.DeclReflection;
 import org.shaderslang.wasm.reflection.EntryPointReflection;
 import org.shaderslang.wasm.reflection.ShaderReflection;
 import org.shaderslang.wasm.reflection.TypeLayoutReflection;
@@ -511,6 +512,41 @@ class SlangCompilerSmokeTest {
             assertTrue(result.diagnostics().contains("NoSuchMaterial"),
                     "Expected diagnostics to mention the unresolved type name. Diagnostics:\n"
                     + result.diagnostics());
+        }
+    }
+
+    // ── Phase 12: module-level declaration reflection (DeclReflection) ───────
+
+    @Test
+    void declReflectionReportsStructFieldsAndEntryPointWithoutCompiling() throws Exception {
+        String source =
+            "struct MyStruct {\n"
+            + "    float3 color;\n"
+            + "    int count;\n"
+            + "    float2 offset;\n"
+            + "};\n"
+            + "RWStructuredBuffer<float> output;\n"
+            + "[shader(\"compute\")] [numthreads(1,1,1)]\n"
+            + "void main() { output[0] = 0.0f; }";
+
+        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+             var module = slang.loadModule("decl-reflection", source)) {
+
+            DeclReflection moduleDecl = DeclReflection.parse(module.declReflectionJson());
+            assertEquals(DeclReflection.Kind.MODULE, moduleDecl.kind());
+
+            DeclReflection myStruct = moduleDecl
+                    .child(DeclReflection.Kind.STRUCT, "MyStruct")
+                    .orElseThrow(() -> new AssertionError("Expected a STRUCT child named \"MyStruct\""));
+
+            List<DeclReflection> fields = myStruct.childrenOfKind(DeclReflection.Kind.VARIABLE);
+            assertEquals(3, fields.size(), "Expected three VARIABLE children, got: " + fields);
+            assertEquals(
+                    List.of("color", "count", "offset"),
+                    fields.stream().map(DeclReflection::name).collect(java.util.stream.Collectors.toList()));
+
+            assertTrue(moduleDecl.child(DeclReflection.Kind.FUNCTION, "main").isPresent(),
+                    "Expected a FUNCTION child named \"main\"");
         }
     }
 

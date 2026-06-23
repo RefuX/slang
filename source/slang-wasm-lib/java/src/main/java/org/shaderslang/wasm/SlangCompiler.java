@@ -852,6 +852,28 @@ public final class SlangCompiler implements AutoCloseable {
             return result.code();
         }
 
+        /**
+         * Serialise this module's module-level declaration tree to JSON (every
+         * struct, function, variable, enum, namespace, and generic declared at
+         * module scope, recursively) — without compiling to any target. Parse
+         * the result with {@link org.shaderslang.wasm.reflection.DeclReflection#parse}.
+         *
+         * @throws IOException if reflection fails; the exception message
+         *                      includes the diagnostics text
+         */
+        public String declReflectionJson() throws IOException {
+            long resultHandle =
+                    instance.export("slang_wasm_module_decl_reflection_json").apply(handle)[0];
+            CompileResult result =
+                    readCompileResult(resultHandle, "slang_wasm_module_decl_reflection_json");
+            if (!result.succeeded()) {
+                throw new IOException(
+                        "slang_wasm_module_decl_reflection_json failed. Diagnostics:\n"
+                        + result.diagnostics());
+            }
+            return result.reflectionJson();
+        }
+
         @Override
         public void close() {
             instance.export("slang_wasm_module_destroy").apply(handle);

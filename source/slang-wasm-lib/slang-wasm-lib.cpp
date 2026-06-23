@@ -23,6 +23,7 @@
 
 #include <cassert>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -200,6 +201,80 @@ static void appendBlob(std::string& out, slang::IBlob* blob)
         return;
     const char* ptr = static_cast<const char*>(blob->getBufferPointer());
     out.append(ptr, blob->getBufferSize());
+}
+
+// Append `s` to `out` as a double-quoted, escaped JSON string literal. Used by
+// the hand-rolled DeclReflection JSON serializer below (there is no existing
+// spReflectionDecl_ToJson in core Slang to call into, unlike spReflection_ToJson
+// for ShaderReflection — see the slang_wasm_module_decl_reflection_json doc
+// comment in slang-wasm-lib.h).
+static void appendJsonString(std::string& out, const char* s)
+{
+    out += '"';
+    if (s)
+    {
+        for (const char* p = s; *p; ++p)
+        {
+            switch (*p)
+            {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(*p) < 0x20)
+                {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", *p);
+                    out += buf;
+                }
+                else
+                {
+                    out += *p;
+                }
+            }
+        }
+    }
+    out += '"';
+}
+
+// Recursively serialize `decl` and its children to JSON: { "name", "kind",
+// "children": [...] }. `children` is omitted when there are none. See the
+// slang_wasm_module_decl_reflection_json doc comment in slang-wasm-lib.h for
+// why this is hand-written here rather than calling into an existing core
+// Slang serializer.
+static void emitDeclReflectionJson(slang::DeclReflection* decl, std::string& out)
+{
+    out += "{\"name\":";
+    appendJsonString(out, decl->getName());
+    out += ",\"kind\":\"";
+    switch (decl->getKind())
+    {
+    case slang::DeclReflection::Kind::Struct: out += "struct"; break;
+    case slang::DeclReflection::Kind::Func: out += "function"; break;
+    case slang::DeclReflection::Kind::Module: out += "module"; break;
+    case slang::DeclReflection::Kind::Generic: out += "generic"; break;
+    case slang::DeclReflection::Kind::Variable: out += "variable"; break;
+    case slang::DeclReflection::Kind::Namespace: out += "namespace"; break;
+    case slang::DeclReflection::Kind::Enum: out += "enum"; break;
+    default: out += "unsupported"; break;
+    }
+    out += "\"";
+
+    unsigned int childCount = decl->getChildrenCount();
+    if (childCount > 0)
+    {
+        out += ",\"children\":[";
+        for (unsigned int i = 0; i < childCount; ++i)
+        {
+            if (i != 0)
+                out += ",";
+            emitDeclReflectionJson(decl->getChild(i), out);
+        }
+        out += "]";
+    }
+    out += "}";
 }
 
 // Copy `blob`'s contents into a freshly malloc'd buffer and write its
@@ -913,6 +988,39 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
     {
         result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
                                "specialization aborted.";
+        return resultHandle;
+    }
+}
+
+// ── Declaration reflection ────────────────────────────────────────────────────
+
+extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModule moduleHandle)
+{
+    auto* result = new WasmResult();
+    uint32_t resultHandle = g_nextResultHandle++;
+    g_results[resultHandle] = result;
+
+    try
+    {
+        auto moduleIt = g_modules.find(moduleHandle);
+        WASM_ASSERT(moduleIt != g_modules.end());
+        slang::IModule* module = moduleIt->second->module;
+
+        slang::DeclReflection* decl = module->getModuleReflection();
+        if (!decl)
+        {
+            result->diagnostics = "[slang-wasm-lib] IModule::getModuleReflection returned null";
+            return resultHandle;
+        }
+
+        emitDeclReflectionJson(decl, result->reflectionJson);
+        result->succeeded = true;
+        return resultHandle;
+    }
+    catch (...)
+    {
+        result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
+                               "decl reflection aborted.";
         return resultHandle;
     }
 }

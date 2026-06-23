@@ -247,6 +247,16 @@ SlangWasmResult slang_wasm_compile_specialized_entry_point(
     SlangWasmSpecArgs args,
     uint32_t targetIndex);
 
+// ── Declaration reflection ────────────────────────────────────────────────────
+
+// Serialise `module`'s module-level declaration tree (mirrors
+// IModule::getModuleReflection): every struct, function, variable, enum,
+// namespace, and generic declared at module scope, recursively — without
+// compiling to any target. On success, the result's reflection_json (see the
+// result accessors below) holds the JSON tree; code/diagnostics are unused on
+// success. Never throws.
+SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModule module);
+
 // ── Compilation ───────────────────────────────────────────────────────────────
 
 // Compile `source` as module `moduleName`, find entry point `entryName`, link,
