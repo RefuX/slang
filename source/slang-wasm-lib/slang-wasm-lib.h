@@ -213,8 +213,10 @@ SlangWasmModule slang_wasm_session_load_module_ir(
 // Specialize a generic shader for concrete types/values before compiling
 // (mirrors IComponentType::specialize). Type conformance / dynamic dispatch
 // (ISession::createTypeConformanceComponentType) and entry-point renaming
-// (IComponentType::renameEntryPoint) are deferred to a later phase — see
-// PLAN.md's Phase 11 completion notes for why.
+// (IComponentType::renameEntryPoint) are not yet implemented: composing
+// ITypeConformance component types for existential/dynamic dispatch is a
+// separable feature with its own API surface, left for when a concrete need
+// for it arises.
 
 typedef uint32_t SlangWasmSpecArgs;
 

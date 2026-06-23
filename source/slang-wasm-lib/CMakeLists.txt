@@ -11,7 +11,7 @@
 #   cmake -DSLANG_GENERATORS_PATH=generators/bin --preset wasi
 #   cmake --build --preset slang-wasm-lib
 #
-# See source/slang-wasm-lib/PLAN.md for the full design.
+# See source/slang-wasm-lib/README.md for usage and the C ABI reference.
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")
     return()
@@ -98,7 +98,7 @@ target_link_options(
         -Wl,--export=slang_wasm_session_create
         -Wl,--export=slang_wasm_session_destroy
         -Wl,--export=slang_wasm_compile
-        # module handle exports (Phase 7).
+        # module handle exports.
         -Wl,--export=slang_wasm_session_load_module
         -Wl,--export=slang_wasm_module_destroy
         -Wl,--export=slang_wasm_module_entry_point_count
@@ -106,18 +106,18 @@ target_link_options(
         -Wl,--export=slang_wasm_module_entry_point_name_len
         -Wl,--export=slang_wasm_compile_entry_point
         -Wl,--export=slang_wasm_compile_module
-        # module serialisation exports (Phase 10).
+        # module serialisation exports.
         -Wl,--export=slang_wasm_module_serialize
         -Wl,--export=slang_wasm_session_load_module_ir
-        # specialization exports (Phase 11).
+        # specialization exports.
         -Wl,--export=slang_wasm_spec_args_create
         -Wl,--export=slang_wasm_spec_args_add_type
         -Wl,--export=slang_wasm_spec_args_add_expr
         -Wl,--export=slang_wasm_spec_args_destroy
         -Wl,--export=slang_wasm_compile_specialized_entry_point
-        # declaration reflection exports (Phase 12).
+        # declaration reflection exports.
         -Wl,--export=slang_wasm_module_decl_reflection_json
-        # disassembly export (Phase 13).
+        # disassembly export.
         -Wl,--export=slang_wasm_module_disassemble
         -Wl,--export=slang_wasm_result_succeeded
         -Wl,--export=slang_wasm_result_code_ptr

@@ -251,7 +251,7 @@ class SlangCompilerSmokeTest {
         }
     }
 
-    // ── Phase 7: module handles, multi-entry-point compilation ───────────────
+    // ── Module handles, multi-entry-point compilation ─────────────────────────
 
     private static final String VERT_FRAG_SHADER =
             "[shader(\"vertex\")]\n"
@@ -455,7 +455,7 @@ class SlangCompilerSmokeTest {
         }
     }
 
-    // ── Phase 11: specialization ──────────────────────────────────────────────
+    // ── Specialization ─────────────────────────────────────────────────────────
 
     @Test
     void specializingGenericEntryPointProducesDistinctBinaries() throws Exception {
@@ -517,7 +517,7 @@ class SlangCompilerSmokeTest {
         }
     }
 
-    // ── Phase 12: module-level declaration reflection (DeclReflection) ───────
+    // ── Module-level declaration reflection (DeclReflection) ──────────────────
 
     @Test
     void declReflectionReportsStructFieldsAndEntryPointWithoutCompiling() throws Exception {
@@ -552,7 +552,7 @@ class SlangCompilerSmokeTest {
         }
     }
 
-    // ── Phase 13: disassembly + structured diagnostics ───────────────────────
+    // ── Disassembly + structured diagnostics ──────────────────────────────────
 
     @Test
     void disassembleProducesNonEmptyIrText() throws Exception {

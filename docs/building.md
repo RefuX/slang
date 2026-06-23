@@ -138,7 +138,7 @@ cmake --build --preset emscripten --target slang-wasm
 > Note: If the last build step fails, try running the command that `emcmake`
 > outputs, directly.
 
-#### WASKI-SDK Build (`slang-wasm-lib`)
+#### WASI-SDK Build (`slang-wasm-lib`)
 
 `slang-wasm-lib` is a self-contained WASI reactor `.wasm` module with a flat C
 ABI. It has **no dependency on Emscripten** at build time or run time, and can
@@ -174,6 +174,11 @@ cmake --build --preset slang-wasm-lib
 ```
 
 Output: `build.wasi/Release/bin/slang-wasm-lib.wasm`
+
+For the Java consumer (a thin wrapper driving this module via the
+[Endive](https://github.com/bytecodealliance/endive) pure-JVM WebAssembly runtime), the full C ABI
+reference, and running the Java test suite, see
+[`source/slang-wasm-lib/README.md`](../source/slang-wasm-lib/README.md).
 
 ### Android build
 
