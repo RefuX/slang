@@ -247,7 +247,8 @@ public enum CompilerOptionName {
     /** bool: insert per-function-entry coverage counters */
     TraceFunctionCoverage(148),
     /** bool: insert per-branch-arm coverage counters */
-    TraceBranchCoverage(149);
+    TraceBranchCoverage(149),
+    CompilerVersion(153);
 
     public final int value;
 

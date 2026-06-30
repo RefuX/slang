@@ -140,27 +140,24 @@ public final class SlangRuntime implements AutoCloseable {
 
         WasmModule module = Parser.parse(wasmPath.toFile());
 
-        var wasi = WasiPreview1.builder()
-                .withOptions(WasiOptions.builder()
-                        .withStdout(System.out)
-                        .withStderr(System.err)
-                        .build())
-                .build();
-
-        Instance inst = new Store()
-                .addFunction(wasi.toHostFunctions())
-                .instantiate("slang-wasm-lib", importValues -> {
-                    var b = Instance.builder(module).withImportValues(importValues);
-                    if (useCompiler) {
-                        // Eagerly compile to JVM bytecode, leaving any function the
-                        // emitter can't handle interpreted (logs a warning per such
-                        // function). Persisting the compiled code to disk is not
-                        // viable for this artifact: caching requires every function
-                        // to be compiled, but a few are too large for the emitter.
-                        b = b.withMachineFactory(MachineFactoryCompiler::compile);
-                    }
-                    return b.build();
-                });
+        Instance inst;
+        if (useCompiler) {
+            try {
+                inst = buildInstance(module, true);
+            } catch (Throwable t) {
+                // Endive's runtime compiler can hard-fail on some modules (e.g. an
+                // ASM frame-computation error on a function it can't translate),
+                // which is not the same as the graceful per-function interpreter
+                // fallback. Degrade to a fully interpreted instance rather than
+                // failing to load the module at all.
+                System.err.println(
+                        "[slang-wasm-lib] runtime compiler failed (" + t
+                        + "); falling back to the interpreter for this instance.");
+                inst = buildInstance(module, false);
+            }
+        } else {
+            inst = buildInstance(module, false);
+        }
 
         // Typed view over the module's exports, generated from the wasm by the
         // @WasmModuleInterface processor (see SlangWasm).
@@ -169,5 +166,29 @@ public final class SlangRuntime implements AutoCloseable {
         // Reactor protocol: call _initialize before any other export.
         wasm._initialize();
         return wasm;
+    }
+
+    /** Instantiate the module, optionally driving execution through the runtime compiler. */
+    private static Instance buildInstance(WasmModule module, boolean useCompiler) {
+        var wasi = WasiPreview1.builder()
+                .withOptions(WasiOptions.builder()
+                        .withStdout(System.out)
+                        .withStderr(System.err)
+                        .build())
+                .build();
+
+        return new Store()
+                .addFunction(wasi.toHostFunctions())
+                .instantiate("slang-wasm-lib", importValues -> {
+                    var b = Instance.builder(module).withImportValues(importValues);
+                    if (useCompiler) {
+                        // Eagerly compile to JVM bytecode. Functions the emitter
+                        // can interpret-fallback are handled per-function; a hard
+                        // failure is caught by the caller and degrades the whole
+                        // instance to the interpreter.
+                        b = b.withMachineFactory(MachineFactoryCompiler::compile);
+                    }
+                    return b.build();
+                });
     }
 }
