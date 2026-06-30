@@ -1,5 +1,6 @@
 package org.shaderslang.wasm;
 
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -24,7 +25,6 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.shaderslang.wasm.SlangCompiler.fromWasm;
 
 /**
  * Smoke tests for SlangCompiler against the real slang-wasm-lib.wasm artifact.
@@ -41,24 +41,50 @@ class SlangCompilerSmokeTest {
 
     private static Path wasmPath;
 
+    /**
+     * One runtime-compiled instance shared by the whole suite. Loading the
+     * ~150 MB module and compiling it to JVM bytecode is the dominant cost, so we
+     * pay it once and open a fresh Slang session per test on top of it. The few
+     * tests that genuinely need a separate instance create their own.
+     */
+    private static SlangRuntime shared;
+
     private static final String TRIVIAL_SHADER =
             "[shader(\"compute\")] [numthreads(1,1,1)] void main() {}";
 
     @BeforeAll
-    static void locateWasm() {
+    static void locateWasm() throws IOException {
         String raw = System.getProperty("slang.wasm.path", "");
         wasmPath = Path.of(raw.isEmpty() ? "slang-wasm-lib.wasm" : raw);
         Assumptions.assumeTrue(
                 Files.exists(wasmPath),
                 "slang-wasm-lib.wasm not found at " + wasmPath.toAbsolutePath()
                 + " — build it first with: cmake --build --preset slang-wasm-lib");
+
+        shared = SlangRuntime.builder(wasmPath)
+                .withRuntimeCompiler(true)
+                .build();
+    }
+
+    @AfterAll
+    static void releaseShared() {
+        if (shared != null) {
+            shared.close();
+        }
+    }
+
+    /** A fresh runtime-compiled instance, for the few tests that need isolation. */
+    private static SlangRuntime freshRuntime() throws IOException {
+        return SlangRuntime.builder(wasmPath)
+                .withRuntimeCompiler(true)
+                .build();
     }
 
     // SPIR-V smoke test ──────────────────────────────────────────────
 
     @Test
     void compileTrivialShaderToSpirv() throws Exception {
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath)) {
+        try (var slang = shared.forSpirv()) {
             CompileResult result = slang.compile("hello", TRIVIAL_SHADER, "main");
 
             assertTrue(result.succeeded(),
@@ -82,7 +108,7 @@ class SlangCompilerSmokeTest {
 
     @Test
     void reflectionJsonContainsEntryPoint() throws Exception {
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath)) {
+        try (var slang = shared.forSpirv()) {
             CompileResult result = slang.compile("reflect", TRIVIAL_SHADER, "main");
 
             assertTrue(result.succeeded(),
@@ -111,7 +137,7 @@ class SlangCompilerSmokeTest {
     void brokenShaderFailsAndInstanceSurvives() throws Exception {
         // Use a single SlangCompiler instance for both calls — the point is to
         // verify that a failed compile leaves the session alive and reusable.
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath)) {
+        try (var slang = shared.forSpirv()) {
 
             // First compile: deliberately broken source (undefined symbol).
             CompileResult bad = slang.compile("broken",
@@ -150,7 +176,7 @@ class SlangCompilerSmokeTest {
             "[shader(\"compute\")] [numthreads(1,1,1)]\n" +
             "void main() { output[0] = level1(0.0f); }";
 
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath)) {
+        try (var slang = shared.forSpirv()) {
             CompileResult result = slang.compile("nested", nested, "main");
 
             assertTrue(result.succeeded(),
@@ -177,10 +203,8 @@ class SlangCompilerSmokeTest {
             "}";
 
         // Without the macro defined: compiles, but takes the #else branch.
-        // One instance per WASM module load (~20 MB); load it once and reuse it
-        // for both sessions in this test to stay within the test JVM's heap.
-        try (var without = fromWasm(
-                wasmPath,
+        // Two sessions with different macro sets, both on the shared instance.
+        try (var without = shared.newSession(
                 List.of(SlangCompiler.TargetSpec.of(Target.SPIRV)),
                 Map.of(),
                 List.of())) {
@@ -193,8 +217,7 @@ class SlangCompilerSmokeTest {
         // (and takes the #ifdef branch, though we only assert success here —
         // the point of this test is that slang_wasm_macro_list_add actually
         // reaches the preprocessor).
-        try (var with = fromWasm(
-                wasmPath,
+        try (var with = shared.newSession(
                 List.of(SlangCompiler.TargetSpec.of(Target.SPIRV)),
                 Map.of("MY_DEFINE", "1"),
                 List.of())) {
@@ -209,8 +232,7 @@ class SlangCompilerSmokeTest {
 
     @Test
     void compilerOptionsAffectCompilation() throws Exception {
-        try (var slang = fromWasm(
-                wasmPath,
+        try (var slang = shared.newSession(
                 List.of(SlangCompiler.TargetSpec.of(Target.SPIRV)),
                 Map.of(),
                 List.of(),
@@ -229,8 +251,7 @@ class SlangCompilerSmokeTest {
 
     @Test
     void twoTargetSessionCompilesBothTargetsByIndex() throws Exception {
-        try (var slang = fromWasm(
-                wasmPath,
+        try (var slang = shared.newSession(
                 List.of(
                         SlangCompiler.TargetSpec.of(Target.SPIRV, "spirv_1_4"),
                         SlangCompiler.TargetSpec.of(Target.HLSL)),
@@ -261,7 +282,7 @@ class SlangCompilerSmokeTest {
 
     @Test
     void moduleReportsEntryPointCountAndCompilesEachIndependently() throws Exception {
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+        try (var slang = shared.forSpirv();
              var module = slang.loadModule("pipeline", VERT_FRAG_SHADER)) {
 
             List<String> entryPoints = module.entryPointNames();
@@ -284,7 +305,7 @@ class SlangCompilerSmokeTest {
 
     @Test
     void compileAllProducesOneCombinedModule() throws Exception {
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+        try (var slang = shared.forSpirv();
              var module = slang.loadModule("pipeline-combined", VERT_FRAG_SHADER)) {
 
             CompileResult combined = module.compileAll(0);
@@ -308,7 +329,7 @@ class SlangCompilerSmokeTest {
 
     @Test
     void loadModuleThrowsWithDiagnosticsOnBrokenSource() throws Exception {
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath)) {
+        try (var slang = shared.forSpirv()) {
             Exception ex = assertThrows(IOException.class,
                     () -> slang.loadModule("broken-module", "this is not valid slang syntax {{{"));
             assertTrue(ex.getMessage().length() > 0, "Expected a non-empty exception message");
@@ -319,12 +340,15 @@ class SlangCompilerSmokeTest {
 
     @Test
     void builderApiCompilesTwoTargetTwoEntryPointPipelineWithNoRawIntegers() throws Exception {
+        // This test exercises the standalone SessionBuilder (its own instance);
+        // run it compiled + cached so it stays fast like the shared-instance tests.
         try (var slang = SlangCompiler.builder()
                 .wasm(wasmPath)
                 .target(Target.SPIRV, "spirv_1_4")
                 .target(Target.HLSL)
                 .define("ENABLE_FOO", "1")
                 .optimizationLevel(OptimizationLevel.NONE)
+                .runtimeCompiler(true)
                 .build();
              var module = slang.loadModule("pipeline-builder", VERT_FRAG_SHADER)) {
 
@@ -355,10 +379,8 @@ class SlangCompilerSmokeTest {
 
     @Test
     void targetIndexOfRejectsUnconfiguredTarget() throws Exception {
-        try (var slang = SlangCompiler.builder()
-                .wasm(wasmPath)
-                .target(Target.SPIRV)
-                .build()) {
+        try (var slang = shared.newSession(
+                List.of(SlangCompiler.TargetSpec.of(Target.SPIRV)), Map.of(), List.of())) {
             assertThrows(IllegalArgumentException.class,
                     () -> slang.compile("x", TRIVIAL_SHADER, "main", Target.HLSL));
         }
@@ -379,7 +401,7 @@ class SlangCompilerSmokeTest {
             + "[shader(\"compute\")] [numthreads(1,1,1)]\n"
             + "void main() { output[0] = gCB.color.x + gCB.count + gCB.offset.x; }";
 
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath)) {
+        try (var slang = shared.forSpirv()) {
             CompileResult result = slang.compile("typed-reflection", source, "main");
             assertTrue(result.succeeded(),
                     "Expected compilation to succeed. Diagnostics:\n" + result.diagnostics());
@@ -421,10 +443,8 @@ class SlangCompilerSmokeTest {
         byte[] ir;
         byte[] originalSpirv;
 
-        // One WASM instance per module load (~20 MB); serialize and close this
-        // instance before opening the second one for the reload, to stay within
-        // the test JVM's heap (see macroDefineChangesCompiledOutput).
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+        // Serialize on the shared instance.
+        try (var slang = shared.forSpirv();
              var module = slang.loadModule("serialize-me", TRIVIAL_SHADER)) {
             CompileResult original = module.compileEntryPoint("main", 0);
             assertTrue(original.succeeded(),
@@ -438,8 +458,9 @@ class SlangCompilerSmokeTest {
 
         // Reload from IR in a brand new instance and session — proving the IR
         // is genuinely self-contained, not relying on anything left over from
-        // the session that produced it.
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+        // the instance that produced it. (Hence a fresh runtime, not the shared one.)
+        try (var runtime = freshRuntime();
+             var slang = runtime.forSpirv();
              var reloaded = slang.loadModuleFromIr("reloaded", ir)) {
 
             List<String> entryPoints = reloaded.entryPointNames();
@@ -470,7 +491,7 @@ class SlangCompilerSmokeTest {
             + "    output[0] = material.getColor();\n"
             + "}";
 
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+        try (var slang = shared.forSpirv();
              var module = slang.loadModule("generic-renderer", source)) {
 
             CompileResult pbr = module.compileSpecialized(
@@ -504,7 +525,7 @@ class SlangCompilerSmokeTest {
             + "    output[0] = material.getColor();\n"
             + "}";
 
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+        try (var slang = shared.forSpirv();
              var module = slang.loadModule("generic-renderer-bad", source)) {
 
             CompileResult result = module.compileSpecialized(
@@ -531,7 +552,7 @@ class SlangCompilerSmokeTest {
             + "[shader(\"compute\")] [numthreads(1,1,1)]\n"
             + "void main() { output[0] = 0.0f; }";
 
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+        try (var slang = shared.forSpirv();
              var module = slang.loadModule("decl-reflection", source)) {
 
             DeclReflection moduleDecl = DeclReflection.parse(module.declReflectionJson());
@@ -556,7 +577,7 @@ class SlangCompilerSmokeTest {
 
     @Test
     void disassembleProducesNonEmptyIrText() throws Exception {
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath);
+        try (var slang = shared.forSpirv();
              var module = slang.loadModule("disasm-me", TRIVIAL_SHADER)) {
             String disasm = module.disassemble();
             assertFalse(disasm.isEmpty(), "Expected non-empty disassembly text");
@@ -567,7 +588,7 @@ class SlangCompilerSmokeTest {
 
     @Test
     void diagnosticListParsesBrokenShaderError() throws Exception {
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath)) {
+        try (var slang = shared.forSpirv()) {
             CompileResult bad = slang.compile("broken-for-diagnostics",
                     "void main() { undefinedFunction(); }", "main");
             assertFalse(bad.succeeded(), "Expected compilation of broken shader to fail");
@@ -590,7 +611,7 @@ class SlangCompilerSmokeTest {
 
     @Test
     void versionStringIsNonEmpty() throws Exception {
-        try (var slang = SlangCompiler.forSpirvFromWasm(wasmPath)) {
+        try (var slang = shared.forSpirv()) {
             String ver = slang.version();
             assertFalse(ver.isEmpty(), "Expected a non-empty version string");
             System.out.println("slang-wasm-lib version: " + ver);

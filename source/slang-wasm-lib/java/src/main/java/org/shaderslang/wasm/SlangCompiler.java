@@ -1,11 +1,5 @@
 package org.shaderslang.wasm;
 
-import run.endive.wasm.Parser;
-import run.endive.runtime.Instance;
-import run.endive.runtime.Store;
-import run.endive.wasi.WasiOptions;
-import run.endive.wasi.WasiPreview1;
-
 import org.shaderslang.wasm.enums.CompilerOptionName;
 import org.shaderslang.wasm.enums.DebugInfoLevel;
 import org.shaderslang.wasm.enums.MatrixLayoutMode;
@@ -149,6 +143,7 @@ public final class SlangCompiler implements AutoCloseable {
         private final Map<String, String> macros = new LinkedHashMap<>();
         private final List<String> searchPaths = new ArrayList<>();
         private final List<CompilerOption> options = new ArrayList<>();
+        private boolean runtimeCompiler = false;
 
         private SessionBuilder() {}
 
@@ -194,6 +189,19 @@ public final class SlangCompiler implements AutoCloseable {
             return this;
         }
 
+        /**
+         * Enable the endive runtime compiler, which compiles the WASM module to
+         * JVM bytecode at instance creation (see {@link SlangRuntime.Builder#withRuntimeCompiler}).
+         * This adds a one-time compilation cost when the session is built but
+         * makes the actual shader compiles dramatically faster than the default
+         * interpreter — worthwhile when the session will compile more than a couple
+         * of shaders.
+         */
+        public SessionBuilder runtimeCompiler(boolean enabled) {
+            this.runtimeCompiler = enabled;
+            return this;
+        }
+
         /** Set the optimization level ({@code CompilerOptionName.Optimization}). */
         public SessionBuilder optimizationLevel(OptimizationLevel level) {
             return option(CompilerOption.of(CompilerOptionName.Optimization, level.value));
@@ -235,7 +243,10 @@ public final class SlangCompiler implements AutoCloseable {
             if (targets.isEmpty()) {
                 throw new IllegalStateException("at least one target(...) is required");
             }
-            return fromWasm(wasmPath, targets, macros, searchPaths, options);
+            SlangRuntime runtime = SlangRuntime.builder(wasmPath)
+                    .withRuntimeCompiler(runtimeCompiler)
+                    .build();
+            return openSession(runtime, targets, macros, searchPaths, options, true);
         }
     }
 
@@ -244,14 +255,22 @@ public final class SlangCompiler implements AutoCloseable {
         return new SessionBuilder();
     }
 
-    private final Instance instance;
-    private final long sessionHandle;
+    private final SlangRuntime runtime;
+    private final SlangWasm_ModuleExports wasm;
+    private final int sessionHandle;
     private final List<Target> targetFormats;
+    /** True when this session created its own {@link SlangRuntime} (standalone
+     *  {@code fromWasm}/{@code builder} factories) and should release it on close;
+     *  false when the runtime is shared (sessions opened via {@link SlangRuntime}). */
+    private final boolean ownsRuntime;
 
-    private SlangCompiler(Instance instance, long sessionHandle, List<Target> targetFormats) {
-        this.instance = instance;
+    private SlangCompiler(SlangRuntime runtime, int sessionHandle, List<Target> targetFormats,
+                          boolean ownsRuntime) {
+        this.runtime = runtime;
+        this.wasm = runtime.wasm();
         this.sessionHandle = sessionHandle;
         this.targetFormats = targetFormats;
+        this.ownsRuntime = ownsRuntime;
     }
 
     /**
@@ -272,21 +291,30 @@ public final class SlangCompiler implements AutoCloseable {
      */
     public static SlangCompiler fromWasm(Path wasmPath, Target targetFormat, String profile)
             throws IOException {
+        return openSession(SlangRuntime.load(wasmPath), targetFormat, profile, true);
+    }
 
-        Instance inst = loadAndInitialize(wasmPath);
+    /**
+     * Open a single-target session on an already-initialized {@code runtime}.
+     * When {@code ownsRuntime} is true the returned compiler releases the runtime
+     * on {@link #close()}; when false the runtime is shared and outlives the
+     * session.
+     */
+    static SlangCompiler openSession(SlangRuntime runtime, Target targetFormat, String profile,
+                                     boolean ownsRuntime) throws IOException {
+        SlangWasm_ModuleExports wasm = runtime.wasm();
 
         // Create the Slang session for the requested target.
         byte[] profileUtf8 = profile.getBytes(StandardCharsets.UTF_8);
-        long profilePtr = 0;
+        int profilePtr = 0;
         if (profileUtf8.length > 0) {
-            profilePtr = allocAndWrite(inst, profileUtf8);
+            profilePtr = allocAndWrite(wasm, profileUtf8);
         }
 
-        long handle = inst.export("slang_wasm_session_create")
-                .apply((long) targetFormat.value, profilePtr, (long) profileUtf8.length)[0];
+        int handle = wasm.slangWasmSessionCreate(targetFormat.value, profilePtr, profileUtf8.length);
 
         if (profilePtr != 0) {
-            inst.export("slang_wasm_free").apply(profilePtr);
+            wasm.slangWasmFree(profilePtr);
         }
 
         if (handle == 0) {
@@ -294,7 +322,7 @@ public final class SlangCompiler implements AutoCloseable {
                     "slang_wasm_session_create returned 0 — failed to create Slang session");
         }
 
-        return new SlangCompiler(inst, handle, List.of(targetFormat));
+        return new SlangCompiler(runtime, handle, List.of(targetFormat), ownsRuntime);
     }
 
     /**
@@ -326,69 +354,82 @@ public final class SlangCompiler implements AutoCloseable {
             List<String> searchPaths,
             List<CompilerOption> options)
             throws IOException {
+        return openSession(SlangRuntime.load(wasmPath), targets, macros, searchPaths, options, true);
+    }
+
+    /**
+     * Open a multi-target session on an already-initialized {@code runtime}.
+     * See {@link #openSession(SlangRuntime, Target, String, boolean)} for the
+     * meaning of {@code ownsRuntime}.
+     */
+    static SlangCompiler openSession(
+            SlangRuntime runtime,
+            List<TargetSpec> targets,
+            Map<String, String> macros,
+            List<String> searchPaths,
+            List<CompilerOption> options,
+            boolean ownsRuntime)
+            throws IOException {
 
         if (targets.isEmpty()) {
             throw new IllegalArgumentException("at least one target is required");
         }
 
-        Instance inst = loadAndInitialize(wasmPath);
+        SlangWasm_ModuleExports wasm = runtime.wasm();
 
-        long targetList = inst.export("slang_wasm_target_list_create").apply()[0];
+        int targetList = wasm.slangWasmTargetListCreate();
         for (TargetSpec target : targets) {
             byte[] profileUtf8 = target.profile.getBytes(StandardCharsets.UTF_8);
-            long profilePtr = profileUtf8.length > 0 ? allocAndWrite(inst, profileUtf8) : 0;
-            long flagsBits = 0;
+            int profilePtr = profileUtf8.length > 0 ? allocAndWrite(wasm, profileUtf8) : 0;
+            int flagsBits = 0;
             for (TargetFlags flag : target.flags) {
                 flagsBits |= flag.value;
             }
-            inst.export("slang_wasm_target_list_add").apply(
-                    targetList, (long) target.format.value,
-                    profilePtr, (long) profileUtf8.length,
+            wasm.slangWasmTargetListAdd(
+                    targetList, target.format.value,
+                    profilePtr, profileUtf8.length,
                     flagsBits);
             if (profilePtr != 0) {
-                inst.export("slang_wasm_free").apply(profilePtr);
+                wasm.slangWasmFree(profilePtr);
             }
         }
 
-        long macroList = inst.export("slang_wasm_macro_list_create").apply()[0];
+        int macroList = wasm.slangWasmMacroListCreate();
         for (var entry : macros.entrySet()) {
             byte[] nameUtf8 = entry.getKey().getBytes(StandardCharsets.UTF_8);
             byte[] valueUtf8 = entry.getValue().getBytes(StandardCharsets.UTF_8);
-            long namePtr = allocAndWrite(inst, nameUtf8);
-            long valuePtr = valueUtf8.length > 0 ? allocAndWrite(inst, valueUtf8) : 0;
-            inst.export("slang_wasm_macro_list_add").apply(
-                    macroList, namePtr, (long) nameUtf8.length,
-                    valuePtr, (long) valueUtf8.length);
-            inst.export("slang_wasm_free").apply(namePtr);
+            int namePtr = allocAndWrite(wasm, nameUtf8);
+            int valuePtr = valueUtf8.length > 0 ? allocAndWrite(wasm, valueUtf8) : 0;
+            wasm.slangWasmMacroListAdd(
+                    macroList, namePtr, nameUtf8.length,
+                    valuePtr, valueUtf8.length);
+            wasm.slangWasmFree(namePtr);
             if (valuePtr != 0) {
-                inst.export("slang_wasm_free").apply(valuePtr);
+                wasm.slangWasmFree(valuePtr);
             }
         }
 
-        long pathList = inst.export("slang_wasm_path_list_create").apply()[0];
+        int pathList = wasm.slangWasmPathListCreate();
         for (String path : searchPaths) {
             byte[] pathUtf8 = path.getBytes(StandardCharsets.UTF_8);
-            long pathPtr = allocAndWrite(inst, pathUtf8);
-            inst.export("slang_wasm_path_list_add").apply(pathList, pathPtr, (long) pathUtf8.length);
-            inst.export("slang_wasm_free").apply(pathPtr);
+            int pathPtr = allocAndWrite(wasm, pathUtf8);
+            wasm.slangWasmPathListAdd(pathList, pathPtr, pathUtf8.length);
+            wasm.slangWasmFree(pathPtr);
         }
 
-        long optionList = inst.export("slang_wasm_options_create").apply()[0];
+        int optionList = wasm.slangWasmOptionsCreate();
         for (CompilerOption option : options) {
             if (option.isString) {
                 byte[] valUtf8 = option.stringValue.getBytes(StandardCharsets.UTF_8);
-                long valPtr = allocAndWrite(inst, valUtf8);
-                inst.export("slang_wasm_options_add_string")
-                        .apply(optionList, (long) option.name.value, valPtr, (long) valUtf8.length);
-                inst.export("slang_wasm_free").apply(valPtr);
+                int valPtr = allocAndWrite(wasm, valUtf8);
+                wasm.slangWasmOptionsAddString(optionList, option.name.value, valPtr, valUtf8.length);
+                wasm.slangWasmFree(valPtr);
             } else {
-                inst.export("slang_wasm_options_add_int")
-                        .apply(optionList, (long) option.name.value, (long) option.intValue);
+                wasm.slangWasmOptionsAddInt(optionList, option.name.value, option.intValue);
             }
         }
 
-        long handle = inst.export("slang_wasm_session_create2")
-                .apply(targetList, macroList, pathList, optionList)[0];
+        int handle = wasm.slangWasmSessionCreate2(targetList, macroList, pathList, optionList);
 
         if (handle == 0) {
             throw new IOException(
@@ -399,7 +440,7 @@ public final class SlangCompiler implements AutoCloseable {
         for (TargetSpec target : targets) {
             formats.add(target.format);
         }
-        return new SlangCompiler(inst, handle, formats);
+        return new SlangCompiler(runtime, handle, formats, ownsRuntime);
     }
 
     /**
@@ -432,25 +473,6 @@ public final class SlangCompiler implements AutoCloseable {
         return found;
     }
 
-    /** Parse, instantiate, and run the WASI reactor protocol's _initialize export. */
-    private static Instance loadAndInitialize(Path wasmPath) throws IOException {
-        var module = Parser.parse(wasmPath.toFile());
-
-        var wasi = WasiPreview1.builder()
-                .withOptions(WasiOptions.builder()
-                        .withStdout(System.out)
-                        .withStderr(System.err)
-                        .build())
-                .build();
-
-        var store = new Store().addFunction(wasi.toHostFunctions());
-        Instance inst = store.instantiate("slang-wasm-lib", module);
-
-        // Reactor protocol: call _initialize before any other export.
-        inst.export("_initialize").apply();
-        return inst;
-    }
-
     /**
      * Compile {@code source} as module {@code moduleName} and link entry point
      * {@code entryPoint}. Never throws for compile errors: errors are captured in
@@ -476,22 +498,22 @@ public final class SlangCompiler implements AutoCloseable {
         byte[] sourceUtf8     = source.getBytes(StandardCharsets.UTF_8);
         byte[] entryUtf8      = entryPoint.getBytes(StandardCharsets.UTF_8);
 
-        long modPtr   = allocAndWrite(instance, moduleNameUtf8);
-        long srcPtr   = allocAndWrite(instance, sourceUtf8);
-        long entryPtr = allocAndWrite(instance, entryUtf8);
+        int modPtr   = allocAndWrite(wasm, moduleNameUtf8);
+        int srcPtr   = allocAndWrite(wasm, sourceUtf8);
+        int entryPtr = allocAndWrite(wasm, entryUtf8);
 
-        long resultHandle;
+        int resultHandle;
         try {
-            resultHandle = instance.export("slang_wasm_compile").apply(
+            resultHandle = wasm.slangWasmCompile(
                     sessionHandle,
-                    modPtr,   (long) moduleNameUtf8.length,
-                    srcPtr,   (long) sourceUtf8.length,
-                    entryPtr, (long) entryUtf8.length,
-                    (long) targetIndex)[0];
+                    modPtr,   moduleNameUtf8.length,
+                    srcPtr,   sourceUtf8.length,
+                    entryPtr, entryUtf8.length,
+                    targetIndex);
         } finally {
-            instance.export("slang_wasm_free").apply(modPtr);
-            instance.export("slang_wasm_free").apply(srcPtr);
-            instance.export("slang_wasm_free").apply(entryPtr);
+            wasm.slangWasmFree(modPtr);
+            wasm.slangWasmFree(srcPtr);
+            wasm.slangWasmFree(entryPtr);
         }
 
         return readCompileResult(resultHandle, "slang_wasm_compile");
@@ -571,26 +593,30 @@ public final class SlangCompiler implements AutoCloseable {
     }
 
     /** Read and destroy a {@code SlangWasmResult} handle, producing a {@link CompileResult}. */
-    private CompileResult readCompileResult(long resultHandle, String sourceExportName) {
+    private CompileResult readCompileResult(int resultHandle, String sourceExportName) {
         if (resultHandle == 0) {
             return new CompileResult(false, new byte[0], "",
                     sourceExportName + " returned handle 0");
         }
 
         try {
-            boolean ok = instance.export("slang_wasm_result_succeeded")
-                    .apply(resultHandle)[0] != 0;
+            boolean ok = wasm.slangWasmResultSucceeded(resultHandle) != 0;
 
-            byte[] code        = readWasmBytes("slang_wasm_result_code_ptr",
-                                               "slang_wasm_result_code_len", resultHandle);
-            String reflJson    = readWasmString("slang_wasm_result_reflection_json_ptr",
-                                                "slang_wasm_result_reflection_json_len", resultHandle);
-            String diagnostics = readWasmString("slang_wasm_result_diagnostics_ptr",
-                                                "slang_wasm_result_diagnostics_len", resultHandle);
+            int codePtr = wasm.slangWasmResultCodePtr(resultHandle);
+            int codeLen = wasm.slangWasmResultCodeLen(resultHandle);
+            byte[] code = codeLen == 0 ? new byte[0] : wasm.memory().readBytes(codePtr, codeLen);
+
+            int reflPtr = wasm.slangWasmResultReflectionJsonPtr(resultHandle);
+            int reflLen = wasm.slangWasmResultReflectionJsonLen(resultHandle);
+            String reflJson = reflLen == 0 ? "" : wasm.memory().readString(reflPtr, reflLen);
+
+            int diagPtr = wasm.slangWasmResultDiagnosticsPtr(resultHandle);
+            int diagLen = wasm.slangWasmResultDiagnosticsLen(resultHandle);
+            String diagnostics = diagLen == 0 ? "" : wasm.memory().readString(diagPtr, diagLen);
 
             return new CompileResult(ok, code, reflJson, diagnostics);
         } finally {
-            instance.export("slang_wasm_result_destroy").apply(resultHandle);
+            wasm.slangWasmResultDestroy(resultHandle);
         }
     }
 
@@ -607,26 +633,26 @@ public final class SlangCompiler implements AutoCloseable {
     public SlangModule loadModule(String moduleName, String source) throws IOException {
         byte[] nameUtf8 = moduleName.getBytes(StandardCharsets.UTF_8);
         byte[] sourceUtf8 = source.getBytes(StandardCharsets.UTF_8);
-        long namePtr = allocAndWrite(instance, nameUtf8);
-        long sourcePtr = allocAndWrite(instance, sourceUtf8);
+        int namePtr = allocAndWrite(wasm, nameUtf8);
+        int sourcePtr = allocAndWrite(wasm, sourceUtf8);
 
         // Two adjacent 4-byte out-param slots for the load's diagnostics
         // (ptr, len); slang_wasm_session_load_module writes into both,
         // regardless of whether the load succeeds.
-        long diagOut = allocAndWrite(instance, new byte[8]);
-        long diagPtrAddr = diagOut;
-        long diagLenAddr = diagOut + 4;
+        int diagOut = allocAndWrite(wasm, new byte[8]);
+        int diagPtrAddr = diagOut;
+        int diagLenAddr = diagOut + 4;
 
-        long moduleHandle;
+        int moduleHandle;
         try {
-            moduleHandle = instance.export("slang_wasm_session_load_module").apply(
+            moduleHandle = wasm.slangWasmSessionLoadModule(
                     sessionHandle,
-                    namePtr,   (long) nameUtf8.length,
-                    sourcePtr, (long) sourceUtf8.length,
-                    diagPtrAddr, diagLenAddr)[0];
+                    namePtr,   nameUtf8.length,
+                    sourcePtr, sourceUtf8.length,
+                    diagPtrAddr, diagLenAddr);
         } finally {
-            instance.export("slang_wasm_free").apply(namePtr);
-            instance.export("slang_wasm_free").apply(sourcePtr);
+            wasm.slangWasmFree(namePtr);
+            wasm.slangWasmFree(sourcePtr);
         }
 
         String diagnostics = readAndFreeDiagOut(diagOut);
@@ -652,23 +678,23 @@ public final class SlangCompiler implements AutoCloseable {
      */
     public SlangModule loadModuleFromIr(String moduleName, byte[] ir) throws IOException {
         byte[] nameUtf8 = moduleName.getBytes(StandardCharsets.UTF_8);
-        long namePtr = allocAndWrite(instance, nameUtf8);
-        long irPtr = allocAndWrite(instance, ir);
+        int namePtr = allocAndWrite(wasm, nameUtf8);
+        int irPtr = allocAndWrite(wasm, ir);
 
-        long diagOut = allocAndWrite(instance, new byte[8]);
-        long diagPtrAddr = diagOut;
-        long diagLenAddr = diagOut + 4;
+        int diagOut = allocAndWrite(wasm, new byte[8]);
+        int diagPtrAddr = diagOut;
+        int diagLenAddr = diagOut + 4;
 
-        long moduleHandle;
+        int moduleHandle;
         try {
-            moduleHandle = instance.export("slang_wasm_session_load_module_ir").apply(
+            moduleHandle = wasm.slangWasmSessionLoadModuleIr(
                     sessionHandle,
-                    namePtr, (long) nameUtf8.length,
-                    irPtr,   (long) ir.length,
-                    diagPtrAddr, diagLenAddr)[0];
+                    namePtr, nameUtf8.length,
+                    irPtr,   ir.length,
+                    diagPtrAddr, diagLenAddr);
         } finally {
-            instance.export("slang_wasm_free").apply(namePtr);
-            instance.export("slang_wasm_free").apply(irPtr);
+            wasm.slangWasmFree(namePtr);
+            wasm.slangWasmFree(irPtr);
         }
 
         String diagnostics = readAndFreeDiagOut(diagOut);
@@ -687,13 +713,13 @@ public final class SlangCompiler implements AutoCloseable {
      * 4-byte out-param slots starting at {@code diagOut}, then free both that scratch
      * allocation and (if non-null) the diagnostics buffer itself.
      */
-    private String readAndFreeDiagOut(long diagOut) {
+    private String readAndFreeDiagOut(int diagOut) {
         int diagPtr = readI32(diagOut);
         int diagLen = readI32(diagOut + 4);
-        instance.export("slang_wasm_free").apply(diagOut);
-        String diagnostics = diagLen > 0 ? instance.memory().readString(diagPtr, diagLen) : "";
+        wasm.slangWasmFree(diagOut);
+        String diagnostics = diagLen > 0 ? wasm.memory().readString(diagPtr, diagLen) : "";
         if (diagPtr != 0) {
-            instance.export("slang_wasm_free").apply((long) diagPtr);
+            wasm.slangWasmFree(diagPtr);
         }
         return diagnostics;
     }
@@ -705,10 +731,10 @@ public final class SlangCompiler implements AutoCloseable {
      * {@link #close()} once no more entry points need compiling.
      */
     public final class SlangModule implements AutoCloseable {
-        private final long handle;
+        private final int handle;
         private final String diagnostics;
 
-        private SlangModule(long handle, String diagnostics) {
+        private SlangModule(int handle, String diagnostics) {
             this.handle = handle;
             this.diagnostics = diagnostics;
         }
@@ -720,14 +746,12 @@ public final class SlangCompiler implements AutoCloseable {
 
         /** Names of the entry points (functions marked {@code [shader("...")]}) defined in this module. */
         public List<String> entryPointNames() {
-            int count = (int) instance.export("slang_wasm_module_entry_point_count").apply(handle)[0];
+            int count = wasm.slangWasmModuleEntryPointCount(handle);
             List<String> names = new ArrayList<>(count);
             for (int i = 0; i < count; i++) {
-                int ptr = (int) instance.export("slang_wasm_module_entry_point_name_ptr")
-                        .apply(handle, (long) i)[0];
-                int len = (int) instance.export("slang_wasm_module_entry_point_name_len")
-                        .apply(handle, (long) i)[0];
-                names.add(len == 0 ? "" : instance.memory().readString(ptr, len));
+                int ptr = wasm.slangWasmModuleEntryPointNamePtr(handle, i);
+                int len = wasm.slangWasmModuleEntryPointNameLen(handle, i);
+                names.add(len == 0 ? "" : wasm.memory().readString(ptr, len));
             }
             return names;
         }
@@ -739,13 +763,13 @@ public final class SlangCompiler implements AutoCloseable {
          */
         public CompileResult compileEntryPoint(String entryPoint, int targetIndex) {
             byte[] entryUtf8 = entryPoint.getBytes(StandardCharsets.UTF_8);
-            long entryPtr = allocAndWrite(instance, entryUtf8);
-            long resultHandle;
+            int entryPtr = allocAndWrite(wasm, entryUtf8);
+            int resultHandle;
             try {
-                resultHandle = instance.export("slang_wasm_compile_entry_point").apply(
-                        sessionHandle, handle, entryPtr, (long) entryUtf8.length, (long) targetIndex)[0];
+                resultHandle = wasm.slangWasmCompileEntryPoint(
+                        sessionHandle, handle, entryPtr, entryUtf8.length, targetIndex);
             } finally {
-                instance.export("slang_wasm_free").apply(entryPtr);
+                wasm.slangWasmFree(entryPtr);
             }
             return readCompileResult(resultHandle, "slang_wasm_compile_entry_point");
         }
@@ -770,8 +794,7 @@ public final class SlangCompiler implements AutoCloseable {
          * {@link CompileResult}.
          */
         public CompileResult compileAll(int targetIndex) {
-            long resultHandle = instance.export("slang_wasm_compile_module")
-                    .apply(sessionHandle, handle, (long) targetIndex)[0];
+            int resultHandle = wasm.slangWasmCompileModule(sessionHandle, handle, targetIndex);
             return readCompileResult(resultHandle, "slang_wasm_compile_module");
         }
 
@@ -797,26 +820,27 @@ public final class SlangCompiler implements AutoCloseable {
         public CompileResult compileSpecialized(
                 String entryPoint, List<SpecializationArg> args, int targetIndex) {
             byte[] entryUtf8 = entryPoint.getBytes(StandardCharsets.UTF_8);
-            long entryPtr = allocAndWrite(instance, entryUtf8);
+            int entryPtr = allocAndWrite(wasm, entryUtf8);
 
-            long argsHandle = instance.export("slang_wasm_spec_args_create").apply()[0];
+            int argsHandle = wasm.slangWasmSpecArgsCreate();
             for (SpecializationArg arg : args) {
                 byte[] valueUtf8 = arg.value.getBytes(StandardCharsets.UTF_8);
-                long valuePtr = allocAndWrite(instance, valueUtf8);
-                String addExport = arg.isType
-                        ? "slang_wasm_spec_args_add_type"
-                        : "slang_wasm_spec_args_add_expr";
-                instance.export(addExport).apply(argsHandle, valuePtr, (long) valueUtf8.length);
-                instance.export("slang_wasm_free").apply(valuePtr);
+                int valuePtr = allocAndWrite(wasm, valueUtf8);
+                if (arg.isType) {
+                    wasm.slangWasmSpecArgsAddType(argsHandle, valuePtr, valueUtf8.length);
+                } else {
+                    wasm.slangWasmSpecArgsAddExpr(argsHandle, valuePtr, valueUtf8.length);
+                }
+                wasm.slangWasmFree(valuePtr);
             }
 
-            long resultHandle;
+            int resultHandle;
             try {
-                resultHandle = instance.export("slang_wasm_compile_specialized_entry_point").apply(
-                        sessionHandle, handle, entryPtr, (long) entryUtf8.length,
-                        argsHandle, (long) targetIndex)[0];
+                resultHandle = wasm.slangWasmCompileSpecializedEntryPoint(
+                        sessionHandle, handle, entryPtr, entryUtf8.length,
+                        argsHandle, targetIndex);
             } finally {
-                instance.export("slang_wasm_free").apply(entryPtr);
+                wasm.slangWasmFree(entryPtr);
             }
             return readCompileResult(resultHandle, "slang_wasm_compile_specialized_entry_point");
         }
@@ -843,7 +867,7 @@ public final class SlangCompiler implements AutoCloseable {
          *                      includes the diagnostics text
          */
         public byte[] serialize() throws IOException {
-            long resultHandle = instance.export("slang_wasm_module_serialize").apply(handle)[0];
+            int resultHandle = wasm.slangWasmModuleSerialize(handle);
             CompileResult result = readCompileResult(resultHandle, "slang_wasm_module_serialize");
             if (!result.succeeded()) {
                 throw new IOException(
@@ -862,8 +886,7 @@ public final class SlangCompiler implements AutoCloseable {
          *                      includes the diagnostics text
          */
         public String declReflectionJson() throws IOException {
-            long resultHandle =
-                    instance.export("slang_wasm_module_decl_reflection_json").apply(handle)[0];
+            int resultHandle = wasm.slangWasmModuleDeclReflectionJson(handle);
             CompileResult result =
                     readCompileResult(resultHandle, "slang_wasm_module_decl_reflection_json");
             if (!result.succeeded()) {
@@ -881,7 +904,7 @@ public final class SlangCompiler implements AutoCloseable {
          *                      includes the diagnostics text
          */
         public String disassemble() throws IOException {
-            long resultHandle = instance.export("slang_wasm_module_disassemble").apply(handle)[0];
+            int resultHandle = wasm.slangWasmModuleDisassemble(handle);
             CompileResult result = readCompileResult(resultHandle, "slang_wasm_module_disassemble");
             if (!result.succeeded()) {
                 throw new IOException(
@@ -895,7 +918,7 @@ public final class SlangCompiler implements AutoCloseable {
 
         @Override
         public void close() {
-            instance.export("slang_wasm_module_destroy").apply(handle);
+            wasm.slangWasmModuleDestroy(handle);
         }
     }
 
@@ -904,46 +927,33 @@ public final class SlangCompiler implements AutoCloseable {
      * the WASM module. Useful for sanity-checking the loaded build.
      */
     public String version() {
-        long ptr = instance.export("slang_wasm_version").apply()[0];
-        return instance.memory().readCString((int) ptr);
+        int ptr = wasm.slangWasmVersion();
+        return wasm.memory().readCString(ptr);
     }
 
     @Override
     public void close() {
-        instance.export("slang_wasm_session_destroy").apply(sessionHandle);
+        wasm.slangWasmSessionDestroy(sessionHandle);
+        if (ownsRuntime) {
+            runtime.close();
+        }
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
     /** Allocate space in WASM linear memory and copy {@code bytes} into it. */
-    private static long allocAndWrite(Instance inst, byte[] bytes) {
-        long ptr = inst.export("slang_wasm_alloc").apply((long) bytes.length)[0];
+    private static int allocAndWrite(SlangWasm_ModuleExports wasm, byte[] bytes) {
+        int ptr = wasm.slangWasmAlloc(bytes.length);
         if (ptr == 0) {
             throw new OutOfMemoryError("slang_wasm_alloc returned NULL for size " + bytes.length);
         }
-        inst.memory().write((int) ptr, bytes);
+        wasm.memory().write(ptr, bytes);
         return ptr;
     }
 
-    /** Read a byte array from WASM linear memory via a (ptr, len) export pair. */
-    private byte[] readWasmBytes(String ptrExport, String lenExport, long handle) {
-        int ptr = (int) instance.export(ptrExport).apply(handle)[0];
-        int len = (int) instance.export(lenExport).apply(handle)[0];
-        if (len == 0) return new byte[0];
-        return instance.memory().readBytes(ptr, len);
-    }
-
-    /** Read a UTF-8 string from WASM linear memory via a (ptr, len) export pair. */
-    private String readWasmString(String ptrExport, String lenExport, long handle) {
-        int ptr = (int) instance.export(ptrExport).apply(handle)[0];
-        int len = (int) instance.export(lenExport).apply(handle)[0];
-        if (len == 0) return "";
-        return instance.memory().readString(ptr, len);
-    }
-
     /** Read a little-endian i32 out-param written by the WASM module at `addr`. */
-    private int readI32(long addr) {
-        byte[] b = instance.memory().readBytes((int) addr, 4);
+    private int readI32(int addr) {
+        byte[] b = wasm.memory().readBytes(addr, 4);
         return (b[0] & 0xFF) | ((b[1] & 0xFF) << 8) | ((b[2] & 0xFF) << 16) | ((b[3] & 0xFF) << 24);
     }
 }

@@ -13,27 +13,76 @@ java {
 sourceSets.main.java.srcDirs += ['src/generated/java']
 
 repositories {
+    // run.endive:*:999-SNAPSHOT — a fork off the 1.0.0 release carrying the
+    // @WasmModuleInterface fixes — is published to the local Maven repo.
+    mavenLocal()
     mavenCentral()
 }
 
+// The slang-wasm-lib.wasm artifact. @WasmModuleInterface reads this at COMPILE
+// TIME to generate the typed export/import wrappers (SlangWasm_ModuleExports
+// etc.), and the tests load it at run time. It is produced by the CMake build
+// (cmake --build --preset slang-wasm-lib). Override the location with
+// -Pslang.wasm.path=... or the SLANG_WASM_PATH environment variable.
+def wasmFile = file(project.findProperty('slang.wasm.path')
+        ?: System.getenv('SLANG_WASM_PATH')
+        ?: "${rootProject.projectDir}/../../../build.wasi/Release/bin/slang-wasm-lib.wasm")
+
+// Stage only slang-wasm-lib.wasm into its own directory so the annotation
+// processor path holds just that one file. Pointing the processor path at the
+// real build/bin directory would make Gradle fingerprint ~400 MB of unrelated
+// wasm artifacts on every build.
+def stageWasmForAnnotationProcessor = tasks.register('stageWasmForAnnotationProcessor', Sync) {
+    doFirst {
+        if (!wasmFile.exists()) {
+            throw new GradleException(
+                    "slang-wasm-lib.wasm not found at ${wasmFile}\n" +
+                    "@WasmModuleInterface reads it at compile time to generate the typed WASM\n" +
+                    "bindings, so it must exist before compiling. Build it first with\n" +
+                    "  cmake --build --preset slang-wasm-lib\n" +
+                    "or point the build at an existing artifact with -Pslang.wasm.path=... or " +
+                    "the SLANG_WASM_PATH environment variable.")
+        }
+    }
+    from(wasmFile)
+    into(layout.buildDirectory.dir("wasm-annotation-processor"))
+}
+
 dependencies {
-    implementation 'run.endive:runtime:0.0.1'
-    implementation 'run.endive:wasi:0.0.1'
+    implementation 'run.endive:runtime:1.0.0'
+    implementation 'run.endive:wasi:1.0.0'
+    // Optional runtime compiler (compiles the WASM to JVM bytecode for much
+    // faster execution). Only exercised when SlangRuntime.withRuntimeCompiler is on.
+    implementation 'run.endive:compiler:1.0.0'
+
+    // The @WasmModuleInterface annotation and the processor that turns the wasm
+    // into typed binding classes at compile time. The annotation is only needed
+    // while compiling, so it is compileOnly.
+    compileOnly 'run.endive:annotations:999-SNAPSHOT'
+    annotationProcessor 'run.endive:annotations-processor:999-SNAPSHOT'
+    // Put the staged slang-wasm-lib.wasm on the annotation processor path so the
+    // classpath-name form @WasmModuleInterface("slang-wasm-lib.wasm") resolves
+    // it. files(<task>) also wires the build dependency on the staging task.
+    annotationProcessor files(stageWasmForAnnotationProcessor)
 
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+tasks.named('compileJava') {
+    // Parsing the ~150 MB wasm during annotation processing needs a large heap,
+    // so fork javac into its own process with a generous memory ceiling.
+    options.fork = true
+    options.forkOptions.jvmArgs += ['-Xmx8g']
+}
+
 test {
     useJUnitPlatform()
 
-    jvmArgs '-Xmx2g'
+    // The tests share one runtime-compiled instance; eager-compiling the ~150 MB
+    // module to JVM bytecode needs significant heap.
+    jvmArgs '-Xmx10g'
 
-    // Point tests at the WASM artifact. Override with -Pslang.wasm.path=...
-    // or the SLANG_WASM_PATH environment variable.
-    def wasmPath = project.findProperty('slang.wasm.path')
-        ?: System.getenv('SLANG_WASM_PATH')
-        ?: "${rootProject.projectDir}/../../../build.wasi/Release/bin/slang-wasm-lib.wasm"
-
-    systemProperty 'slang.wasm.path', wasmPath
+    // Point tests at the same WASM artifact resolved above.
+    systemProperty 'slang.wasm.path', wasmFile.absolutePath
 }
