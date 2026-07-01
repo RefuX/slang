@@ -1,25 +1,18 @@
-# slang-wasm-lib — WASI reactor WebAssembly module.
 #
-# Only built when CMAKE_SYSTEM_NAME is WASI (i.e. the 'wasi' preset using
-# wasi-sdk). The target is a WASI reactor: no main(), exports _initialize and
-# a flat C ABI shim callable from any WASI-compatible WebAssembly runtime.
+# slang-wasm-lib — WASI reactor WebAssembly module
 #
-# Build sequence (from repo root):
-#   cmake --workflow --preset generators --fresh
-#   cmake --install build --config Release --prefix generators --component generators
-#   export WASI_SDK_PATH=/path/to/wasi-sdk
-#   cmake -DSLANG_GENERATORS_PATH=generators/bin --preset wasi
-#   cmake --build --preset slang-wasm-lib
+# Only built under the 'wasi' preset (wasi-sdk). No main(); exports _initialize
+# and a flat C ABI shim callable from any WASI-compatible runtime.
+# See source/slang-wasm-lib/README.md for the build sequence and C ABI reference.
 #
-# See source/slang-wasm-lib/README.md for usage and the C ABI reference.
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")
     return()
 endif()
 
-# ---------------------------------------------------------------------------
-# code-generation — regenerate enum bindings when slang.h changes.
-# ---------------------------------------------------------------------------
+#
+# Regenerate enum bindings when slang.h changes
+#
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(_slang_h "${slang_SOURCE_DIR}/include/slang.h")
@@ -81,6 +74,10 @@ target_link_libraries(
 target_link_options(
     slang-wasm-lib
     PRIVATE
+        # Strip DWARF, matching emcc (which strips at link by default; wasm-ld
+        # does not). The static libs are built with -g in Release, so their
+        # debug info would otherwise bloat the .wasm from ~22 MB to ~138 MB.
+        -Wl,--strip-debug
         # Reactor: link crt1-reactor.o which provides _initialize (calls
         # __wasm_call_ctors) and emits no WASM start section.
         -mexec-model=reactor
