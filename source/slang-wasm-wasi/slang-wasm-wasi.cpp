@@ -1,6 +1,6 @@
-// slang-wasm-lib.cpp — WASI reactor shim exposing a flat C ABI over Slang's COM API.
+// slang-wasm-wasi.cpp — WASI reactor shim exposing a flat C ABI over Slang's COM API.
 //
-// All public symbols are declared in slang-wasm-lib.h. See that file for the
+// All public symbols are declared in slang-wasm-wasi.h. See that file for the
 // ownership and lifetime contract of every exported function.
 //
 // Internal design:
@@ -13,11 +13,7 @@
 //     from an internal Slang assert/abort is converted to a failed result instead
 //     of propagating as a WASM trap that would destroy the instance.
 
-#include "slang-wasm-lib.h"
-
-#include <slang.h>
-#include <slang-com-ptr.h>
-#include <slang-deprecated.h>
+#include "slang-wasm-wasi.h"
 
 #include "../core/slang-blob.h"
 
@@ -27,6 +23,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <slang-com-ptr.h>
+#include <slang-deprecated.h>
+#include <slang.h>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -35,13 +34,13 @@
 // WASM_ASSERT is defined in internal core headers not available to
 // this public-header-only shim. Use a local variant: abort with a message on
 // out-of-contract handles (a programming error, not a shader error).
-#define WASM_ASSERT(cond)                                           \
-    do                                                              \
-    {                                                               \
-        if (!(cond))                                                \
-        {                                                           \
-            __builtin_trap();                                       \
-        }                                                           \
+#define WASM_ASSERT(cond)     \
+    do                        \
+    {                         \
+        if (!(cond))          \
+        {                     \
+            __builtin_trap(); \
+        }                     \
     } while (0)
 
 using Slang::ComPtr;
@@ -207,7 +206,7 @@ static void appendBlob(std::string& out, slang::IBlob* blob)
 // the hand-rolled DeclReflection JSON serializer below (there is no existing
 // spReflectionDecl_ToJson in core Slang to call into, unlike spReflection_ToJson
 // for ShaderReflection — see the slang_wasm_module_decl_reflection_json doc
-// comment in slang-wasm-lib.h).
+// comment in slang-wasm-wasi.h).
 static void appendJsonString(std::string& out, const char* s)
 {
     out += '"';
@@ -217,11 +216,21 @@ static void appendJsonString(std::string& out, const char* s)
         {
             switch (*p)
             {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
+            case '"':
+                out += "\\\"";
+                break;
+            case '\\':
+                out += "\\\\";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
             default:
                 if (static_cast<unsigned char>(*p) < 0x20)
                 {
@@ -241,7 +250,7 @@ static void appendJsonString(std::string& out, const char* s)
 
 // Recursively serialize `decl` and its children to JSON: { "name", "kind",
 // "children": [...] }. `children` is omitted when there are none. See the
-// slang_wasm_module_decl_reflection_json doc comment in slang-wasm-lib.h for
+// slang_wasm_module_decl_reflection_json doc comment in slang-wasm-wasi.h for
 // why this is hand-written here rather than calling into an existing core
 // Slang serializer.
 static void emitDeclReflectionJson(slang::DeclReflection* decl, std::string& out)
@@ -251,14 +260,30 @@ static void emitDeclReflectionJson(slang::DeclReflection* decl, std::string& out
     out += ",\"kind\":\"";
     switch (decl->getKind())
     {
-    case slang::DeclReflection::Kind::Struct: out += "struct"; break;
-    case slang::DeclReflection::Kind::Func: out += "function"; break;
-    case slang::DeclReflection::Kind::Module: out += "module"; break;
-    case slang::DeclReflection::Kind::Generic: out += "generic"; break;
-    case slang::DeclReflection::Kind::Variable: out += "variable"; break;
-    case slang::DeclReflection::Kind::Namespace: out += "namespace"; break;
-    case slang::DeclReflection::Kind::Enum: out += "enum"; break;
-    default: out += "unsupported"; break;
+    case slang::DeclReflection::Kind::Struct:
+        out += "struct";
+        break;
+    case slang::DeclReflection::Kind::Func:
+        out += "function";
+        break;
+    case slang::DeclReflection::Kind::Module:
+        out += "module";
+        break;
+    case slang::DeclReflection::Kind::Generic:
+        out += "generic";
+        break;
+    case slang::DeclReflection::Kind::Variable:
+        out += "variable";
+        break;
+    case slang::DeclReflection::Kind::Namespace:
+        out += "namespace";
+        break;
+    case slang::DeclReflection::Kind::Enum:
+        out += "enum";
+        break;
+    default:
+        out += "unsupported";
+        break;
     }
     out += "\"";
 
@@ -323,16 +348,15 @@ static void linkAndGetCode(
     // the common single-target case).
     ComPtr<slang::IBlob> codeBlob;
     diagBlob = nullptr;
-    r = useTargetCode
-            ? linked->getTargetCode(
-                  static_cast<SlangInt>(targetIndex),
-                  codeBlob.writeRef(),
-                  diagBlob.writeRef())
-            : linked->getEntryPointCode(
-                  0,
-                  static_cast<SlangInt>(targetIndex),
-                  codeBlob.writeRef(),
-                  diagBlob.writeRef());
+    r = useTargetCode ? linked->getTargetCode(
+                            static_cast<SlangInt>(targetIndex),
+                            codeBlob.writeRef(),
+                            diagBlob.writeRef())
+                      : linked->getEntryPointCode(
+                            0,
+                            static_cast<SlangInt>(targetIndex),
+                            codeBlob.writeRef(),
+                            diagBlob.writeRef());
     appendBlob(result->diagnostics, diagBlob);
     if (SLANG_FAILED(r) || !codeBlob)
         return;
@@ -410,8 +434,8 @@ extern "C" void slang_wasm_free(void* ptr)
 // flat, generator-produced object with no nesting beyond two levels.
 static int32_t lookupEnumByLowercaseName(const char* section, const std::string& nameUpper)
 {
-    const char* json = reinterpret_cast<const char*>(
-        static_cast<uintptr_t>(slang_wasm_enum_metadata_ptr()));
+    const char* json =
+        reinterpret_cast<const char*>(static_cast<uintptr_t>(slang_wasm_enum_metadata_ptr()));
     size_t jsonLen = slang_wasm_enum_metadata_len();
     std::string blob(json, jsonLen);
 
@@ -648,8 +672,7 @@ extern "C" SlangWasmSession slang_wasm_session_create2(
         if (!optionEntries.empty())
         {
             sessionDesc.compilerOptionEntries = optionEntries.data();
-            sessionDesc.compilerOptionEntryCount =
-                static_cast<uint32_t>(optionEntries.size());
+            sessionDesc.compilerOptionEntryCount = static_cast<uint32_t>(optionEntries.size());
         }
 
         ComPtr<slang::ISession> session;
@@ -657,10 +680,7 @@ extern "C" SlangWasmSession slang_wasm_session_create2(
         if (SLANG_FAILED(r))
             return 0;
 
-        return insertHandle(
-            g_sessions,
-            &g_nextSessionHandle,
-            new WasmSession{std::move(session)});
+        return insertHandle(g_sessions, &g_nextSessionHandle, new WasmSession{std::move(session)});
     }
     catch (...)
     {
@@ -796,7 +816,7 @@ extern "C" SlangWasmResult slang_wasm_module_serialize(SlangWasmModule moduleHan
         SlangResult r = module->serialize(irBlob.writeRef());
         if (SLANG_FAILED(r) || !irBlob)
         {
-            result->diagnostics = "[slang-wasm-lib] IModule::serialize failed";
+            result->diagnostics = "[slang-wasm-wasi] IModule::serialize failed";
             return resultHandle;
         }
 
@@ -807,7 +827,7 @@ extern "C" SlangWasmResult slang_wasm_module_serialize(SlangWasmModule moduleHan
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
+        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
                                "module serialization aborted.";
         return resultHandle;
     }
@@ -909,8 +929,7 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
 
         std::string entryNameStr(entryName, entryNameLen);
         ComPtr<slang::IEntryPoint> entryPoint;
-        SlangResult r =
-            module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
+        SlangResult r = module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
         if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
@@ -958,7 +977,7 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
                     if (!type)
                     {
                         result->diagnostics +=
-                            "\n[slang-wasm-lib] specialization type not found: " + entry.value;
+                            "\n[slang-wasm-wasi] specialization type not found: " + entry.value;
                         return resultHandle;
                     }
                     args.push_back(slang::SpecializationArg::fromType(type));
@@ -986,7 +1005,7 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
+        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
                                "specialization aborted.";
         return resultHandle;
     }
@@ -1009,7 +1028,7 @@ extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModul
         slang::DeclReflection* decl = module->getModuleReflection();
         if (!decl)
         {
-            result->diagnostics = "[slang-wasm-lib] IModule::getModuleReflection returned null";
+            result->diagnostics = "[slang-wasm-wasi] IModule::getModuleReflection returned null";
             return resultHandle;
         }
 
@@ -1019,7 +1038,7 @@ extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModul
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
+        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
                                "decl reflection aborted.";
         return resultHandle;
     }
@@ -1041,7 +1060,7 @@ extern "C" SlangWasmResult slang_wasm_module_disassemble(SlangWasmModule moduleH
         SlangResult r = module->disassemble(disasmBlob.writeRef());
         if (SLANG_FAILED(r) || !disasmBlob)
         {
-            result->diagnostics = "[slang-wasm-lib] IModule::disassemble failed";
+            result->diagnostics = "[slang-wasm-wasi] IModule::disassemble failed";
             return resultHandle;
         }
 
@@ -1051,7 +1070,7 @@ extern "C" SlangWasmResult slang_wasm_module_disassemble(SlangWasmModule moduleH
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
+        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
                                "disassembly aborted.";
         return resultHandle;
     }
@@ -1097,8 +1116,7 @@ extern "C" SlangWasmResult slang_wasm_compile(
         // Step 2: find the entry point.
         ComPtr<slang::IEntryPoint> entryPoint;
         diagBlob = nullptr;
-        SlangResult r =
-            module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
+        SlangResult r = module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
         if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
@@ -1109,7 +1127,7 @@ extern "C" SlangWasmResult slang_wasm_compile(
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
+        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
                                "compilation aborted.";
         return resultHandle;
     }
@@ -1139,8 +1157,7 @@ extern "C" SlangWasmResult slang_wasm_compile_entry_point(
         std::string entryNameStr(entryName, entryNameLen);
 
         ComPtr<slang::IEntryPoint> entryPoint;
-        SlangResult r =
-            module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
+        SlangResult r = module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
         if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
@@ -1150,7 +1167,7 @@ extern "C" SlangWasmResult slang_wasm_compile_entry_point(
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
+        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
                                "compilation aborted.";
         return resultHandle;
     }
@@ -1191,7 +1208,7 @@ extern "C" SlangWasmResult slang_wasm_compile_module(
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-lib] internal exception caught; "
+        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
                                "compilation aborted.";
         return resultHandle;
     }
@@ -1210,8 +1227,7 @@ extern "C" uint32_t slang_wasm_result_code_ptr(SlangWasmResult handle)
 {
     auto it = g_results.find(handle);
     WASM_ASSERT(it != g_results.end());
-    return static_cast<uint32_t>(
-        reinterpret_cast<uintptr_t>(it->second->code.data()));
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->code.data()));
 }
 
 extern "C" uint32_t slang_wasm_result_code_len(SlangWasmResult handle)
@@ -1225,8 +1241,7 @@ extern "C" uint32_t slang_wasm_result_reflection_json_ptr(SlangWasmResult handle
 {
     auto it = g_results.find(handle);
     WASM_ASSERT(it != g_results.end());
-    return static_cast<uint32_t>(
-        reinterpret_cast<uintptr_t>(it->second->reflectionJson.data()));
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->reflectionJson.data()));
 }
 
 extern "C" uint32_t slang_wasm_result_reflection_json_len(SlangWasmResult handle)
@@ -1240,8 +1255,7 @@ extern "C" uint32_t slang_wasm_result_diagnostics_ptr(SlangWasmResult handle)
 {
     auto it = g_results.find(handle);
     WASM_ASSERT(it != g_results.end());
-    return static_cast<uint32_t>(
-        reinterpret_cast<uintptr_t>(it->second->diagnostics.data()));
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->diagnostics.data()));
 }
 
 extern "C" uint32_t slang_wasm_result_diagnostics_len(SlangWasmResult handle)

@@ -130,7 +130,7 @@ namespace Slang
     Slang::String& /* outFileName */)
 {
     // WASI does not provide mkstemp; temporary file creation is not available
-    // on the compile-from-string path that slang-wasm-lib uses.
+    // on the compile-from-string path that slang-wasm-wasi uses.
     return SLANG_FAIL;
 }
 #else

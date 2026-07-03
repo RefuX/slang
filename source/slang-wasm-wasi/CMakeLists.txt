@@ -1,9 +1,9 @@
 #
-# slang-wasm-lib — WASI reactor WebAssembly module
+# slang-wasm-wasi — WASI reactor WebAssembly module
 #
 # Only built under the 'wasi' preset (wasi-sdk). No main(); exports _initialize
 # and a flat C ABI shim callable from any WASI-compatible runtime.
-# See source/slang-wasm-lib/README.md for the build sequence and C ABI reference.
+# See source/slang-wasm-wasi/README.md for the build sequence and C ABI reference.
 #
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")
@@ -22,16 +22,19 @@ set(_enum_meta_cpp "${CMAKE_CURRENT_SOURCE_DIR}/slang-wasm-enum-metadata.cpp")
 # Java enums are opt-in: pass --java-out to generate-slang-bindings.py manually
 # when the Java binding needs to be refreshed.
 if(${_slang_h} IS_NEWER_THAN ${_enum_meta_cpp})
-    message(STATUS "slang-wasm-lib: regenerating enum bindings from slang.h")
+    message(STATUS "slang-wasm-wasi: regenerating enum bindings from slang.h")
     execute_process(
         COMMAND
-            ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate-slang-bindings.py"
-            "--slang-h" "${_slang_h}"
-            "--cpp-out" "${_enum_meta_cpp}"
+            ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate-slang-bindings.py"
+            "--slang-h" "${_slang_h}" "--cpp-out" "${_enum_meta_cpp}"
         RESULT_VARIABLE _gen_result
     )
     if(NOT _gen_result EQUAL 0)
-        message(FATAL_ERROR "generate-slang-bindings.py failed (exit ${_gen_result})")
+        message(
+            FATAL_ERROR
+            "generate-slang-bindings.py failed (exit ${_gen_result})"
+        )
     endif()
 endif()
 
@@ -39,26 +42,23 @@ endif()
 # sysroot subdirectory holds the EH-aware variant.
 set(WASI_EH_LIB_DIR "${CMAKE_SYSROOT}/lib/wasm32-wasip1/eh")
 
-add_executable(slang-wasm-lib slang-wasm-lib.cpp slang-wasm-enum-metadata.cpp)
+add_executable(slang-wasm-wasi slang-wasm-wasi.cpp slang-wasm-enum-metadata.cpp)
 
 set_target_properties(
-    slang-wasm-lib
+    slang-wasm-wasi
     PROPERTIES
         SUFFIX ".wasm"
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Release/bin"
         RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Debug/bin"
-        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/RelWithDebInfo/bin"
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO
+            "${CMAKE_BINARY_DIR}/RelWithDebInfo/bin"
         RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/MinSizeRel/bin"
 )
 
-target_include_directories(
-    slang-wasm-lib
-    PRIVATE
-        ${slang_SOURCE_DIR}/include
-)
+target_include_directories(slang-wasm-wasi PRIVATE ${slang_SOURCE_DIR}/include)
 
 target_link_libraries(
-    slang-wasm-lib
+    slang-wasm-wasi
     PRIVATE
         slang
         core
@@ -72,7 +72,7 @@ target_link_libraries(
 )
 
 target_link_options(
-    slang-wasm-lib
+    slang-wasm-wasi
     PRIVATE
         # Strip DWARF, matching emcc (which strips at link by default; wasm-ld
         # does not). The static libs are built with -g in Release, so their
