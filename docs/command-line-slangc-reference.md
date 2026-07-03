@@ -192,7 +192,7 @@ Accepted profiles are:
 
 * sm_{4_0,4_1,5_0,5_1,6_0,6_1,6_2,6_3,6_4,6_5,6_6,6_7,6_8,6_9,6_10} 
 
-* glsl_{110,120,130,140,150,330,400,410,420,430,440,450,460} 
+* glsl_{150,330,400,410,420,430,440,450,460} 
 
 Additional profiles that include [-stage](#stage-1) information: 
 
@@ -256,6 +256,14 @@ all - Treat all warnings as errors.
 **-warnings-disable &lt;id&gt;\[,&lt;id&gt;...\]**
 
 Disable specific warning ids. 
+
+
+<a id="wall"></a>
+### -Wall, -Wextra, -Wpedantic
+
+**-Wall | -Wextra | -Wpedantic**
+
+Enable the corresponding group of opt-in warnings (additive). Staging: the pedantic group is currently enabled by default, so passing the pedantic flag is a no-op today; a future release will make it opt-in. 
 
 
 <a id="w"></a>
@@ -1307,6 +1315,7 @@ Stage
 * `mesh` 
 * `amplification`, `task` 
 * `dispatch` 
+* `node` 
 
 <a id="vulkan-shift"></a>
 ## vulkan-shift
@@ -1399,6 +1408,7 @@ A capability describes an optional feature that a target may or may not support.
 * `SPV_EXT_descriptor_heap` : enables the SPV_EXT_descriptor_heap extension 
 * `SPV_KHR_untyped_pointers` : enables the SPV_KHR_untyped_pointers extension 
 * `SPV_KHR_bfloat16` : enables the SPV_KHR_bfloat16 extension 
+* `SPV_EXT_shader_64bit_indexing` : enables the SPV_EXT_shader_64bit_indexing extension 
 * `spvAbort` 
 * `spvDeviceGroup` 
 * `spvAtomicFloat32AddEXT` 
@@ -1461,6 +1471,7 @@ A capability describes an optional feature that a target may or may not support.
 * `spvVulkanMemoryModelDeviceScopeKHR` 
 * `spvBindlessTextureNV` 
 * `spvDescriptorHeapEXT` 
+* `spvShader64BitIndexingEXT` 
 * `ser_hlsl_native` 
 * `metallib_latest` 
 * `dxil_lib` 
@@ -1637,6 +1648,7 @@ A capability describes an optional feature that a target may or may not support.
 * `mesh` 
 * `task` 
 * `amplification` 
+* `node` 
 * `any_stage` 
 * `amplification_mesh` 
 * `raytracing_stages` 
