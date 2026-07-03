@@ -141,8 +141,7 @@ cmake --build --preset emscripten --target slang-wasm
 #### WASI-SDK Build (`slang-wasm-wasi`)
 
 `slang-wasm-wasi` is a self-contained WASI reactor `.wasm` module with a flat C
-ABI. It has **no dependency on Emscripten** at build time or run time, and can
-be loaded by any WASI-compatible WebAssembly runtime.
+ABI. It can be loaded by any WASI-compatible WebAssembly runtime.
 
 **Prerequisites:** [WASI-SDK](https://github.com/WebAssembly/wasi-sdk/releases)
 (version 33 or later). Download and unpack the release for your platform, then
@@ -162,7 +161,7 @@ first, then the WASI cross build):
 ```bash
 # 1. Build native generators (skip if already built for another preset).
 cmake --workflow --preset generators --fresh
-mkdir -p generators
+mkdir generators
 cmake --install build --config Release --prefix generators --component generators
 
 # 2. Configure with wasi-sdk.
@@ -175,10 +174,8 @@ cmake --build --preset slang-wasm-wasi
 
 Output: `build.wasi/Release/bin/slang-wasm-wasi.wasm`
 
-For the Java consumer (a thin wrapper driving this module via the
-[Endive](https://github.com/bytecodealliance/endive) pure-JVM WebAssembly runtime), the full C ABI
-reference, and running the Java test suite, see
-[`source/slang-wasm-wasi/README.md`](../source/slang-wasm-wasi/README.md).
+For details on consuming the module, its C ABI, and the enum binding generator,
+see [`source/slang-wasm-wasi/README.md`](../source/slang-wasm-wasi/README.md).
 
 ### Android build
 
