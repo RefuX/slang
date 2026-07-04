@@ -192,11 +192,15 @@ jobs:
             cmake --install build --config Release --component generators --prefix generators
             cmake -DSLANG_GENERATORS_PATH=generators/bin --preset wasi
             cmake --build --preset slang-wasm-wasi --config "$cmake_config"
-            # Build-only gate for now: no WASI runtime is set up in this job to
-            # actually instantiate and call into the module the way the
-            # Emscripten build's node smoke-test does above. This still catches
-            # build breaks, generator failures, and export/signature drift.
             [ -f "build.wasi/$cmake_config/bin/slang-wasm-wasi.wasm" ]
+            # Pin wasmtime to a known-good version, same rationale as the
+            # emsdk/wasi-sdk pins above: an unpinned `latest` could silently
+            # break this smoke test on an unrelated wasmtime release.
+            python3 -m pip install --quiet "wasmtime==46.0.1"
+            mkdir "build.wasi/$cmake_config/bin/smoke"
+            cp tests/wasm-wasi/smoke/* "build.wasi/$cmake_config/bin/smoke/"
+            cd "build.wasi/$cmake_config/bin"
+            python3 smoke/smoke-test.py slang-wasm-wasi.wasm smoke/rand_float.slang computeMain
           else
             # Prepare cache launcher arguments (prefer sccache, fall back to ccache)
             cmake_launcher_defines=()
