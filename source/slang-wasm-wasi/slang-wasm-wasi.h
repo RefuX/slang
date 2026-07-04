@@ -179,12 +179,14 @@ extern "C"
     void slang_wasm_module_destroy(SlangWasmModule module);
 
     // Number of entry points defined in the module (functions marked
-    // `[shader("...")]`), per IModule::getDefinedEntryPointCount.
+    // `[shader("...")]`), per IModule::getDefinedEntryPointCount. Returns 0
+    // for an unknown module handle.
     uint32_t slang_wasm_module_entry_point_count(SlangWasmModule module);
 
     // Pointer and byte length of the name of the entry point at `index`
     // (0 <= index < slang_wasm_module_entry_point_count(module)). Valid until
-    // slang_wasm_module_destroy.
+    // slang_wasm_module_destroy. Returns 0 for an unknown module handle or an
+    // out-of-range index.
     uint32_t slang_wasm_module_entry_point_name_ptr(SlangWasmModule module, uint32_t index);
     uint32_t slang_wasm_module_entry_point_name_len(SlangWasmModule module, uint32_t index);
 
@@ -311,8 +313,12 @@ extern "C"
         uint32_t targetIndex);
 
     // ── Result accessors ──────────────────────────────────────────────────────────
+    //
+    // Every accessor below returns a 0/empty sentinel for an unknown result
+    // handle, rather than trapping the instance.
 
-    // Returns 1 if compilation succeeded, 0 otherwise.
+    // Returns 1 if compilation succeeded, 0 otherwise (including for an
+    // unknown handle).
     int32_t slang_wasm_result_succeeded(SlangWasmResult result);
 
     // Pointer and byte length of the compiled target code blob (e.g. SPIR-V words).

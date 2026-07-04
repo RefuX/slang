@@ -73,7 +73,6 @@ to (re)create the C++ metadata blob.
 | `slang-wasm-enum-metadata.cpp` | always  | C++ static JSON blob baked into the WASM module, exported via `slang_wasm_enum_metadata_ptr/len`. Dynamic-language runtimes (Go, Python, Rust) call these two exports at startup to resolve enum integer values without hardcoding them. Generated at configure time; gitignored, not committed. |
 | `<java-out>/*.java`            | opt-in  | One Java enum per Slang enum, with integer values baked in from `slang.h`. Provides compile-time type safety and IDE autocomplete. Only emitted when `--java-out` is supplied.                                                                                                                   |
 
-
 ---
 
 ## C ABI reference

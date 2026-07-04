@@ -117,6 +117,9 @@ Most applications should not need to touch this section.
         #define SLANG_WIIU 1
     #elif defined(__EMSCRIPTEN__) || defined(__wasi__)
         #define SLANG_WASM 1
+        #if defined(__wasi__)
+            #define SLANG_WASI 1
+        #endif
     #else
         #error "unknown target platform"
     #endif
@@ -164,6 +167,9 @@ Most applications should not need to touch this section.
     #endif
     #ifndef SLANG_WASM
         #define SLANG_WASM 0
+    #endif
+    #ifndef SLANG_WASI
+        #define SLANG_WASI 0
     #endif
 #endif /* SLANG_PLATFORM */
 

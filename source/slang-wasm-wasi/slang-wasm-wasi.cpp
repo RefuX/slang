@@ -15,10 +15,13 @@
 
 #include "slang-wasm-wasi.h"
 
+#include "../compiler-core/slang-pretty-writer.h"
 #include "../core/slang-blob.h"
+#include "../core/slang-string-escape-util.h"
+#include "../core/slang-type-text-util.h"
+#include "../slang/slang-profile.h"
 
 #include <cassert>
-#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -31,9 +34,20 @@
 #include <utility>
 #include <vector>
 
-// WASM_ASSERT is defined in internal core headers not available to
-// this public-header-only shim. Use a local variant: abort with a message on
-// out-of-contract handles (a programming error, not a shader error).
+// A hard WASM trap for an out-of-contract handle passed to a builder
+// mutator (target/macro/path/options list _add, spec_args _add_*): the
+// handle is one the caller just created via the matching _create call, so
+// passing a stale or wrong one is a pure caller bug with no legitimate way
+// to arise from normal use, not a recoverable runtime condition — and these
+// functions have no result object to hang a diagnostic off of anyway.
+// Every other entry point either wraps its body in try/catch and uses
+// SLANG_RELEASE_ASSERT instead (its failure throws a Slang exception, which
+// the surrounding catch (...) converts into a failed result rather than
+// destroying the instance), or is a simple accessor that returns a 0/empty
+// sentinel on an unknown handle instead of asserting at all. (SLANG_ASSERT/
+// SLANG_RELEASE_ASSERT are available here despite this being a
+// public-header-only shim: slang-blob.h transitively includes
+// slang-common.h, which defines them, and `core` is already linked.)
 #define WASM_ASSERT(cond)     \
     do                        \
     {                         \
@@ -44,12 +58,6 @@
     } while (0)
 
 using Slang::ComPtr;
-
-// Declared in slang-wasm-enum-metadata.cpp; reused here to back
-// slang_wasm_target_from_string / slang_wasm_stage_from_string without
-// duplicating the name tables.
-extern "C" uint32_t slang_wasm_enum_metadata_ptr(void);
-extern "C" uint32_t slang_wasm_enum_metadata_len(void);
 
 // ── Internal types ────────────────────────────────────────────────────────────
 
@@ -183,6 +191,21 @@ static T* takeHandle(std::unordered_map<uint32_t, T*>& table, uint32_t handle)
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// Convert a (ptr, len) argument pair from the host into a std::string,
+// treating a null ptr as an empty string. Used at every (ptr, len) argument
+// site instead of calling std::string's (ptr, len) constructor directly:
+// that constructor's contract requires a non-null ptr whenever len > 0, and
+// violating it is undefined behavior rather than a catchable exception, so
+// it would not be saved by any of this file's try/catch blocks. A null ptr
+// with a nonzero len is a realistic caller mistake here, not just a
+// theoretical one — slang_wasm_alloc can return null on allocation failure,
+// and a caller could plausibly forward that null straight into one of these
+// arguments without checking it first.
+static std::string toStr(const char* ptr, uint32_t len)
+{
+    return ptr ? std::string(ptr, len) : std::string();
+}
+
 // Ensure the single shared IGlobalSession exists. Returns false on failure.
 static bool ensureGlobalSession()
 {
@@ -202,104 +225,74 @@ static void appendBlob(std::string& out, slang::IBlob* blob)
     out.append(ptr, blob->getBufferSize());
 }
 
-// Append `s` to `out` as a double-quoted, escaped JSON string literal. Used by
-// the hand-rolled DeclReflection JSON serializer below (there is no existing
-// spReflectionDecl_ToJson in core Slang to call into, unlike spReflection_ToJson
-// for ShaderReflection — see the slang_wasm_module_decl_reflection_json doc
-// comment in slang-wasm-wasi.h).
-static void appendJsonString(std::string& out, const char* s)
-{
-    out += '"';
-    if (s)
-    {
-        for (const char* p = s; *p; ++p)
-        {
-            switch (*p)
-            {
-            case '"':
-                out += "\\\"";
-                break;
-            case '\\':
-                out += "\\\\";
-                break;
-            case '\n':
-                out += "\\n";
-                break;
-            case '\r':
-                out += "\\r";
-                break;
-            case '\t':
-                out += "\\t";
-                break;
-            default:
-                if (static_cast<unsigned char>(*p) < 0x20)
-                {
-                    char buf[8];
-                    snprintf(buf, sizeof(buf), "\\u%04x", *p);
-                    out += buf;
-                }
-                else
-                {
-                    out += *p;
-                }
-            }
-        }
-    }
-    out += '"';
-}
-
 // Recursively serialize `decl` and its children to JSON: { "name", "kind",
-// "children": [...] }. `children` is omitted when there are none. See the
-// slang_wasm_module_decl_reflection_json doc comment in slang-wasm-wasi.h for
-// why this is hand-written here rather than calling into an existing core
-// Slang serializer.
-static void emitDeclReflectionJson(slang::DeclReflection* decl, std::string& out)
+// "children": [...] }. `children` is omitted when there are none. Built with
+// Slang::PrettyWriter to reuse the same StringBuilder/escaping machinery
+// spReflection_ToJson (called from linkAndGetCode above) already uses for
+// reflection JSON, instead of hand-rolling string escaping and comma-joining.
+// String values are escaped via StringEscapeUtil directly with Style::JSON,
+// not via PrettyWriter::writeEscapedString (which hardcodes Style::Cpp): Cpp
+// escaping falls back to octal escapes like "\001" for control/high bytes,
+// which are not valid JSON syntax, whereas Style::JSON emits \uXXXX.
+static void emitDeclReflectionJson(slang::DeclReflection* decl, Slang::PrettyWriter& writer)
 {
-    out += "{\"name\":";
-    appendJsonString(out, decl->getName());
-    out += ",\"kind\":\"";
+    auto jsonHandler = Slang::StringEscapeUtil::getHandler(Slang::StringEscapeUtil::Style::JSON);
+
+    writer << "{\"name\":";
+    Slang::StringEscapeUtil::appendQuoted(
+        jsonHandler,
+        Slang::UnownedStringSlice(decl->getName()),
+        writer.getBuilder());
+    writer << ",\"kind\":\"";
     switch (decl->getKind())
     {
     case slang::DeclReflection::Kind::Struct:
-        out += "struct";
+        writer << "struct";
         break;
     case slang::DeclReflection::Kind::Func:
-        out += "function";
+        writer << "function";
         break;
     case slang::DeclReflection::Kind::Module:
-        out += "module";
+        writer << "module";
         break;
     case slang::DeclReflection::Kind::Generic:
-        out += "generic";
+        writer << "generic";
         break;
     case slang::DeclReflection::Kind::Variable:
-        out += "variable";
+        writer << "variable";
         break;
     case slang::DeclReflection::Kind::Namespace:
-        out += "namespace";
+        writer << "namespace";
         break;
     case slang::DeclReflection::Kind::Enum:
-        out += "enum";
+        writer << "enum";
         break;
     default:
-        out += "unsupported";
+        writer << "unsupported";
         break;
     }
-    out += "\"";
+    writer << "\"";
 
     unsigned int childCount = decl->getChildrenCount();
     if (childCount > 0)
     {
-        out += ",\"children\":[";
+        // A plain indexed comma join, matching the sibling "fields" array
+        // loop in slang-reflection-json.cpp's emitReflectionTypeJSON, rather
+        // than PrettyWriter's maybeComma()/CommaTrackerRAII: that machinery
+        // is for objects whose fields are each conditionally emitted (so the
+        // "was there a previous field" state can't be known from a loop
+        // index alone); here every child is unconditionally comma-joined by
+        // position, so a simple index check already gives the right answer.
+        writer << ",\"children\":[";
         for (unsigned int i = 0; i < childCount; ++i)
         {
             if (i != 0)
-                out += ",";
-            emitDeclReflectionJson(decl->getChild(i), out);
+                writer << ",";
+            emitDeclReflectionJson(decl->getChild(i), writer);
         }
-        out += "]";
+        writer << "]";
     }
-    out += "}";
+    writer << "}";
 }
 
 // Copy `blob`'s contents into a freshly malloc'd buffer and write its
@@ -320,6 +313,15 @@ static void writeDiagOut(slang::IBlob* blob, uint32_t* diagPtrOut, uint32_t* dia
     }
     size_t size = blob->getBufferSize();
     void* buf = malloc(size);
+    if (!buf)
+    {
+        // Drop the diagnostics rather than memcpy into a null buffer: losing
+        // the diagnostic text under allocation failure is preferable to
+        // crashing the instance over it.
+        *diagPtrOut = 0;
+        *diagLenOut = 0;
+        return;
+    }
     memcpy(buf, blob->getBufferPointer(), size);
     *diagPtrOut = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(buf));
     *diagLenOut = static_cast<uint32_t>(size);
@@ -427,58 +429,30 @@ extern "C" void slang_wasm_free(void* ptr)
 
 // ── Enum metadata ─────────────────────────────────────────────────────────────
 
-// Look up `name` (case-sensitively, against the upper-cased enumerator name
-// recorded in the generated metadata blob) under the JSON sub-object `section`,
-// matching e.g. "spirv" -> "SPIRV" : 6. Returns -1 if not found. Implemented by
-// a small hand-rolled scan rather than a JSON parser: the metadata blob is a
-// flat, generator-produced object with no nesting beyond two levels.
-static int32_t lookupEnumByLowercaseName(const char* section, const std::string& nameUpper)
-{
-    const char* json =
-        reinterpret_cast<const char*>(static_cast<uintptr_t>(slang_wasm_enum_metadata_ptr()));
-    size_t jsonLen = slang_wasm_enum_metadata_len();
-    std::string blob(json, jsonLen);
-
-    std::string sectionKey = std::string("\"") + section + "\":{";
-    size_t sectionPos = blob.find(sectionKey);
-    if (sectionPos == std::string::npos)
-        return -1;
-    size_t sectionStart = sectionPos + sectionKey.size();
-    size_t sectionEnd = blob.find("}", sectionStart);
-    if (sectionEnd == std::string::npos)
-        return -1;
-
-    std::string entryKey = std::string("\"") + nameUpper + "\":";
-    size_t entryPos = blob.find(entryKey, sectionStart);
-    if (entryPos == std::string::npos || entryPos >= sectionEnd)
-        return -1;
-
-    size_t valueStart = entryPos + entryKey.size();
-    return static_cast<int32_t>(std::strtol(blob.c_str() + valueStart, nullptr, 10));
-}
-
-// Upper-case a string in place, matching the generator's enumerator naming
-// convention (e.g. "spirv" -> "SPIRV").
-static std::string toUpper(const char* s, uint32_t len)
-{
-    std::string out(s, len);
-    for (char& c : out)
-        c = static_cast<char>(::toupper(static_cast<unsigned char>(c)));
-    return out;
-}
-
 extern "C" int32_t slang_wasm_target_from_string(const char* name, uint32_t nameLen)
 {
     if (!name || nameLen == 0)
         return -1;
-    return lookupEnumByLowercaseName("Target", toUpper(name, nameLen));
+    // Delegate to the same name table that backs the compiler's own `-target`
+    // command-line flag, rather than re-deriving names from the generated
+    // enum metadata blob: this recognizes every alias the real compiler does
+    // (e.g. both "spv" and "spirv" name SLANG_SPIRV), not just the single
+    // name mechanically derived from the C++ enumerator's spelling.
+    SlangCompileTarget target =
+        Slang::TypeTextUtil::findCompileTargetFromName(Slang::UnownedStringSlice(name, nameLen));
+    return target == SLANG_TARGET_UNKNOWN ? -1 : static_cast<int32_t>(target);
 }
 
 extern "C" int32_t slang_wasm_stage_from_string(const char* name, uint32_t nameLen)
 {
     if (!name || nameLen == 0)
         return -1;
-    return lookupEnumByLowercaseName("Stage", toUpper(name, nameLen));
+    // Delegate to the same name table that backs the compiler's own `-stage`
+    // command-line flag, for the same reason as slang_wasm_target_from_string
+    // above.
+    Slang::Stage stage =
+        Slang::findStageByName(Slang::String(Slang::UnownedStringSlice(name, nameLen)));
+    return stage == Slang::Stage::Unknown ? -1 : static_cast<int32_t>(stage);
 }
 
 // ── Session descriptor builders ───────────────────────────────────────────────
@@ -530,9 +504,7 @@ extern "C" void slang_wasm_macro_list_add(
 {
     auto it = g_macroLists.find(listHandle);
     WASM_ASSERT(it != g_macroLists.end());
-    it->second->entries.emplace_back(
-        std::string(name, nameLen),
-        std::string(value ? value : "", value ? valueLen : 0));
+    it->second->entries.emplace_back(toStr(name, nameLen), toStr(value, valueLen));
 }
 
 extern "C" void slang_wasm_macro_list_destroy(SlangWasmMacroList handle)
@@ -552,7 +524,7 @@ extern "C" void slang_wasm_path_list_add(
 {
     auto it = g_pathLists.find(listHandle);
     WASM_ASSERT(it != g_pathLists.end());
-    it->second->paths.emplace_back(path, pathLen);
+    it->second->paths.push_back(toStr(path, pathLen));
 }
 
 extern "C" void slang_wasm_path_list_destroy(SlangWasmPathList handle)
@@ -576,7 +548,7 @@ extern "C" void slang_wasm_options_add_string(
     WasmOptionEntry entry;
     entry.name = static_cast<slang::CompilerOptionName>(name);
     entry.isString = true;
-    entry.stringValue.assign(val, valLen);
+    entry.stringValue = toStr(val, valLen);
     it->second->entries.push_back(std::move(entry));
 }
 
@@ -746,11 +718,11 @@ extern "C" SlangWasmModule slang_wasm_session_load_module(
     try
     {
         auto sessionIt = g_sessions.find(sessionHandle);
-        WASM_ASSERT(sessionIt != g_sessions.end());
+        SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
         ComPtr<slang::ISession> session = sessionIt->second->session;
 
-        std::string nameStr(name, nameLen);
-        std::string sourceStr(source, sourceLen);
+        std::string nameStr = toStr(name, nameLen);
+        std::string sourceStr = toStr(source, sourceLen);
 
         ComPtr<slang::IBlob> diagBlob;
         slang::IModule* module = session->loadModuleFromSourceString(
@@ -776,27 +748,36 @@ extern "C" void slang_wasm_module_destroy(SlangWasmModule handle)
     delete takeHandle(g_modules, handle);
 }
 
+// Returns 0 for an unknown handle (rather than trapping the instance): the
+// caller has no result object to hang a diagnostic off of here, and an empty
+// module already legitimately reports 0 entry points, so 0 is a safe,
+// ambiguous-but-harmless sentinel for "nothing to enumerate" either way.
 extern "C" uint32_t slang_wasm_module_entry_point_count(SlangWasmModule handle)
 {
     auto it = g_modules.find(handle);
-    WASM_ASSERT(it != g_modules.end());
+    if (it == g_modules.end())
+        return 0;
     return static_cast<uint32_t>(it->second->entryPointNames.size());
 }
 
+// Returns 0 for an unknown handle or an out-of-range index, for the same
+// reason as slang_wasm_module_entry_point_count above.
 extern "C" uint32_t slang_wasm_module_entry_point_name_ptr(SlangWasmModule handle, uint32_t index)
 {
     auto it = g_modules.find(handle);
-    WASM_ASSERT(it != g_modules.end());
-    WASM_ASSERT(index < it->second->entryPointNames.size());
+    if (it == g_modules.end() || index >= it->second->entryPointNames.size())
+        return 0;
     return static_cast<uint32_t>(
         reinterpret_cast<uintptr_t>(it->second->entryPointNames[index].data()));
 }
 
+// Returns 0 for an unknown handle or an out-of-range index, for the same
+// reason as slang_wasm_module_entry_point_count above.
 extern "C" uint32_t slang_wasm_module_entry_point_name_len(SlangWasmModule handle, uint32_t index)
 {
     auto it = g_modules.find(handle);
-    WASM_ASSERT(it != g_modules.end());
-    WASM_ASSERT(index < it->second->entryPointNames.size());
+    if (it == g_modules.end() || index >= it->second->entryPointNames.size())
+        return 0;
     return static_cast<uint32_t>(it->second->entryPointNames[index].size());
 }
 
@@ -809,7 +790,7 @@ extern "C" SlangWasmResult slang_wasm_module_serialize(SlangWasmModule moduleHan
     try
     {
         auto moduleIt = g_modules.find(moduleHandle);
-        WASM_ASSERT(moduleIt != g_modules.end());
+        SLANG_RELEASE_ASSERT(moduleIt != g_modules.end());
         slang::IModule* module = moduleIt->second->module;
 
         ComPtr<slang::IBlob> irBlob;
@@ -845,11 +826,19 @@ extern "C" SlangWasmModule slang_wasm_session_load_module_ir(
     try
     {
         auto sessionIt = g_sessions.find(sessionHandle);
-        WASM_ASSERT(sessionIt != g_sessions.end());
+        SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
         ComPtr<slang::ISession> session = sessionIt->second->session;
 
-        std::string nameStr(name, nameLen);
+        std::string nameStr = toStr(name, nameLen);
         ComPtr<slang::IBlob> sourceBlob = Slang::RawBlob::create(irBlob, irLen);
+        if (!sourceBlob)
+        {
+            // RawBlob::create returns null both for a (null, len>0) argument
+            // pair and for allocation failure; either way there is no blob
+            // to hand to loadModuleFromIRBlob.
+            writeDiagOut(nullptr, diagPtrOut, diagLenOut);
+            return 0;
+        }
 
         ComPtr<slang::IBlob> diagBlob;
         slang::IModule* module = session->loadModuleFromIRBlob(
@@ -884,7 +873,7 @@ extern "C" void slang_wasm_spec_args_add_type(
 {
     auto it = g_specArgsLists.find(argsHandle);
     WASM_ASSERT(it != g_specArgsLists.end());
-    it->second->entries.push_back({true, std::string(typeName, typeNameLen)});
+    it->second->entries.push_back({true, toStr(typeName, typeNameLen)});
 }
 
 extern "C" void slang_wasm_spec_args_add_expr(
@@ -894,7 +883,7 @@ extern "C" void slang_wasm_spec_args_add_expr(
 {
     auto it = g_specArgsLists.find(argsHandle);
     WASM_ASSERT(it != g_specArgsLists.end());
-    it->second->entries.push_back({false, std::string(expr, exprLen)});
+    it->second->entries.push_back({false, toStr(expr, exprLen)});
 }
 
 extern "C" void slang_wasm_spec_args_destroy(SlangWasmSpecArgs handle)
@@ -920,14 +909,14 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
     try
     {
         auto sessionIt = g_sessions.find(sessionHandle);
-        WASM_ASSERT(sessionIt != g_sessions.end());
+        SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
         slang::ISession* session = sessionIt->second->session.get();
 
         auto moduleIt = g_modules.find(moduleHandle);
-        WASM_ASSERT(moduleIt != g_modules.end());
+        SLANG_RELEASE_ASSERT(moduleIt != g_modules.end());
         slang::IModule* module = moduleIt->second->module;
 
-        std::string entryNameStr(entryName, entryNameLen);
+        std::string entryNameStr = toStr(entryName, entryNameLen);
         ComPtr<slang::IEntryPoint> entryPoint;
         SlangResult r = module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
         if (SLANG_FAILED(r) || !entryPoint)
@@ -1022,7 +1011,7 @@ extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModul
     try
     {
         auto moduleIt = g_modules.find(moduleHandle);
-        WASM_ASSERT(moduleIt != g_modules.end());
+        SLANG_RELEASE_ASSERT(moduleIt != g_modules.end());
         slang::IModule* module = moduleIt->second->module;
 
         slang::DeclReflection* decl = module->getModuleReflection();
@@ -1032,7 +1021,11 @@ extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModul
             return resultHandle;
         }
 
-        emitDeclReflectionJson(decl, result->reflectionJson);
+        Slang::PrettyWriter writer;
+        emitDeclReflectionJson(decl, writer);
+        result->reflectionJson.assign(
+            writer.getBuilder().getBuffer(),
+            static_cast<size_t>(writer.getBuilder().getLength()));
         result->succeeded = true;
         return resultHandle;
     }
@@ -1053,7 +1046,7 @@ extern "C" SlangWasmResult slang_wasm_module_disassemble(SlangWasmModule moduleH
     try
     {
         auto moduleIt = g_modules.find(moduleHandle);
-        WASM_ASSERT(moduleIt != g_modules.end());
+        SLANG_RELEASE_ASSERT(moduleIt != g_modules.end());
         slang::IModule* module = moduleIt->second->module;
 
         ComPtr<slang::IBlob> disasmBlob;
@@ -1095,12 +1088,12 @@ extern "C" SlangWasmResult slang_wasm_compile(
     try
     {
         auto sessionIt = g_sessions.find(sessionHandle);
-        WASM_ASSERT(sessionIt != g_sessions.end());
+        SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
         slang::ISession* session = sessionIt->second->session.get();
 
-        std::string moduleNameStr(moduleName, moduleNameLen);
-        std::string sourceStr(source, sourceLen);
-        std::string entryNameStr(entryName, entryNameLen);
+        std::string moduleNameStr = toStr(moduleName, moduleNameLen);
+        std::string sourceStr = toStr(source, sourceLen);
+        std::string entryNameStr = toStr(entryName, entryNameLen);
 
         // Step 1: load the module from the source string.
         ComPtr<slang::IBlob> diagBlob;
@@ -1147,14 +1140,14 @@ extern "C" SlangWasmResult slang_wasm_compile_entry_point(
     try
     {
         auto sessionIt = g_sessions.find(sessionHandle);
-        WASM_ASSERT(sessionIt != g_sessions.end());
+        SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
         slang::ISession* session = sessionIt->second->session.get();
 
         auto moduleIt = g_modules.find(moduleHandle);
-        WASM_ASSERT(moduleIt != g_modules.end());
+        SLANG_RELEASE_ASSERT(moduleIt != g_modules.end());
         slang::IModule* module = moduleIt->second->module;
 
-        std::string entryNameStr(entryName, entryNameLen);
+        std::string entryNameStr = toStr(entryName, entryNameLen);
 
         ComPtr<slang::IEntryPoint> entryPoint;
         SlangResult r = module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
@@ -1185,11 +1178,11 @@ extern "C" SlangWasmResult slang_wasm_compile_module(
     try
     {
         auto sessionIt = g_sessions.find(sessionHandle);
-        WASM_ASSERT(sessionIt != g_sessions.end());
+        SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
         slang::ISession* session = sessionIt->second->session.get();
 
         auto moduleIt = g_modules.find(moduleHandle);
-        WASM_ASSERT(moduleIt != g_modules.end());
+        SLANG_RELEASE_ASSERT(moduleIt != g_modules.end());
         WasmModule* wasmModule = moduleIt->second;
 
         std::vector<slang::IComponentType*> components;
@@ -1216,52 +1209,64 @@ extern "C" SlangWasmResult slang_wasm_compile_module(
 
 // ── Result accessors ──────────────────────────────────────────────────────────
 
+// Every accessor below returns a 0/empty sentinel for an unknown handle
+// rather than trapping the instance: like the module entry-point accessors
+// above, there is no result object here to hang a diagnostic off of, so a
+// hard trap would only turn one bad caller call into total loss of the
+// module for every other in-flight caller.
 extern "C" int32_t slang_wasm_result_succeeded(SlangWasmResult handle)
 {
     auto it = g_results.find(handle);
-    WASM_ASSERT(it != g_results.end());
+    if (it == g_results.end())
+        return 0;
     return it->second->succeeded ? 1 : 0;
 }
 
 extern "C" uint32_t slang_wasm_result_code_ptr(SlangWasmResult handle)
 {
     auto it = g_results.find(handle);
-    WASM_ASSERT(it != g_results.end());
+    if (it == g_results.end())
+        return 0;
     return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->code.data()));
 }
 
 extern "C" uint32_t slang_wasm_result_code_len(SlangWasmResult handle)
 {
     auto it = g_results.find(handle);
-    WASM_ASSERT(it != g_results.end());
+    if (it == g_results.end())
+        return 0;
     return static_cast<uint32_t>(it->second->code.size());
 }
 
 extern "C" uint32_t slang_wasm_result_reflection_json_ptr(SlangWasmResult handle)
 {
     auto it = g_results.find(handle);
-    WASM_ASSERT(it != g_results.end());
+    if (it == g_results.end())
+        return 0;
     return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->reflectionJson.data()));
 }
 
 extern "C" uint32_t slang_wasm_result_reflection_json_len(SlangWasmResult handle)
 {
     auto it = g_results.find(handle);
-    WASM_ASSERT(it != g_results.end());
+    if (it == g_results.end())
+        return 0;
     return static_cast<uint32_t>(it->second->reflectionJson.size());
 }
 
 extern "C" uint32_t slang_wasm_result_diagnostics_ptr(SlangWasmResult handle)
 {
     auto it = g_results.find(handle);
-    WASM_ASSERT(it != g_results.end());
+    if (it == g_results.end())
+        return 0;
     return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->diagnostics.data()));
 }
 
 extern "C" uint32_t slang_wasm_result_diagnostics_len(SlangWasmResult handle)
 {
     auto it = g_results.find(handle);
-    WASM_ASSERT(it != g_results.end());
+    if (it == g_results.end())
+        return 0;
     return static_cast<uint32_t>(it->second->diagnostics.size());
 }
 
