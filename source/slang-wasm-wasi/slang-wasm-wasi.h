@@ -214,11 +214,10 @@ extern "C"
     //
     // Specialize a generic shader for concrete types/values before compiling
     // (mirrors IComponentType::specialize). Type conformance / dynamic dispatch
-    // (ISession::createTypeConformanceComponentType) and entry-point renaming
-    // (IComponentType::renameEntryPoint) are not yet implemented: composing
-    // ITypeConformance component types for existential/dynamic dispatch is a
-    // separable feature with its own API surface, left for when a concrete need
-    // for it arises.
+    // (ISession::createTypeConformanceComponentType) is not yet implemented:
+    // composing ITypeConformance component types for existential/dynamic
+    // dispatch is a separable feature with its own API surface, left for when
+    // a concrete need for it arises.
 
     typedef uint32_t SlangWasmSpecArgs;
 
@@ -240,11 +239,11 @@ extern "C"
 
     // Find entry point `entryName` in `module`, specialize it with `args` (in
     // argument-list order, matching the generic parameter declaration order), then
-    // link and compile for the target at `targetIndex`. Consumes (destroys) `args`
-    // before returning, success or not. Never throws: internal aborts are caught
-    // and returned as a failed result with diagnostics text.
+    // link and compile for the target at `targetIndex`, using the session `module`
+    // was loaded into (see slang_wasm_session_load_module). Consumes (destroys)
+    // `args` before returning, success or not. Never throws: internal aborts are
+    // caught and returned as a failed result with diagnostics text.
     SlangWasmResult slang_wasm_compile_specialized_entry_point(
-        SlangWasmSession session,
         SlangWasmModule module,
         const char* entryName,
         uint32_t entryNameLen,
@@ -289,28 +288,24 @@ extern "C"
 
     // Compile entry point `entryName` from an already-loaded `module` (see
     // slang_wasm_session_load_module), producing code for the target at
-    // `targetIndex`. Equivalent to slang_wasm_compile but reuses a module already
-    // parsed once, so multiple entry points from the same source can be compiled
-    // independently without re-parsing. Same never-throws contract as
-    // slang_wasm_compile.
+    // `targetIndex`, using the session `module` was loaded into. Equivalent to
+    // slang_wasm_compile but reuses a module already parsed once, so multiple
+    // entry points from the same source can be compiled independently without
+    // re-parsing. Same never-throws contract as slang_wasm_compile.
     SlangWasmResult slang_wasm_compile_entry_point(
-        SlangWasmSession session,
         SlangWasmModule module,
         const char* entryName,
         uint32_t entryNameLen,
         uint32_t targetIndex);
 
     // Compile all of `module`'s defined entry points together into one combined
-    // code blob for the target at `targetIndex` (mirrors
-    // IComponentType::getTargetCode, which — unlike getEntryPointCode — returns a
-    // single blob containing every entry point linked into the component, e.g. one
-    // SPIR-V module with both a vertex and a fragment entry point). Reflection JSON
-    // in the result covers the same combined layout. Same never-throws contract as
-    // slang_wasm_compile.
-    SlangWasmResult slang_wasm_compile_module(
-        SlangWasmSession session,
-        SlangWasmModule module,
-        uint32_t targetIndex);
+    // code blob for the target at `targetIndex`, using the session `module` was
+    // loaded into (mirrors IComponentType::getTargetCode, which — unlike
+    // getEntryPointCode — returns a single blob containing every entry point
+    // linked into the component, e.g. one SPIR-V module with both a vertex and a
+    // fragment entry point). Reflection JSON in the result covers the same
+    // combined layout. Same never-throws contract as slang_wasm_compile.
+    SlangWasmResult slang_wasm_compile_module(SlangWasmModule module, uint32_t targetIndex);
 
     // ── Result accessors ──────────────────────────────────────────────────────────
     //

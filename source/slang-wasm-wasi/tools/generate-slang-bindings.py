@@ -517,7 +517,10 @@ def generate_java_enum(spec: EnumSpec, java_members: list, comments: dict, packa
 
     comments maps each Java member name to a Javadoc string (may be empty).
     package is the Java package the generated enum is declared in, e.g.
-    "org.shaderslang.wasm.enums".
+    "org.shaderslang.wasm.enums". The enum is annotated with
+    javax.annotation.processing.Generated so IDEs and static-analysis tools
+    (e.g. code coverage, "find usages") recognize it as generated code and
+    exclude it from the checks that apply to hand-written sources.
     """
     # One constant per line; all but the last end with a comma, the last with a semicolon.
     member_lines = []
@@ -532,7 +535,10 @@ def generate_java_enum(spec: EnumSpec, java_members: list, comments: dict, packa
         "",
         f"package {package};",
         "",
+        "import javax.annotation.processing.Generated;",
+        "",
         f"/** {spec.javadoc} Mirrors {{@code {spec.c_name}}} in slang.h. */",
+        '@Generated("source/slang-wasm-wasi/tools/generate-slang-bindings.py")',
         f"public enum {spec.java_name} {{",
         *member_lines,
         "",
