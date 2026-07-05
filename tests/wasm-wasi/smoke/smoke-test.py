@@ -2,12 +2,7 @@
 """
 Functional smoke test for the slang-wasm-wasi module.
 
-CI's wasi build previously only checked that slang-wasm-wasi.wasm exists on
-disk -- a build-only gate that catches link/export drift but not runtime bugs
-in the C ABI shim itself (memory ownership, session/module lifecycle, argument
-marshaling). This script instantiates the module in wasmtime (the WASI
-runtime already used to exercise the sibling Emscripten build's bindings via
-Node, see ../../wasm/smoke/smoke-test.js) and drives the flat C ABI documented
+This script instantiates the module in wasmtime  and drives the flat C ABI documented
 in source/slang-wasm-wasi/slang-wasm-wasi.h end to end, across every exported
 function: single- and multi-target sessions, module load/compile/serialize/
 reload, specialization, reflection, disassembly, the failure/diagnostics
