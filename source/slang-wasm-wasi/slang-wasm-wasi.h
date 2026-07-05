@@ -13,7 +13,8 @@
 //   - Pointers returned by the result accessor functions (code_ptr, etc.) are
 //     valid until slang_wasm_result_destroy is called on that result handle.
 
-#pragma once
+#ifndef SLANG_WASM_WASI_H
+#define SLANG_WASM_WASI_H
 
 #include <stdint.h>
 
@@ -57,7 +58,7 @@ extern "C"
     // caller and must be destroyed (or are consumed exactly once by
     // slang_wasm_session_create2, which destroys them internally on return).
 
-    typedef uint32_t SlangWasmTargetList;
+    using SlangWasmTargetList = uint32_t;
 
     // Create an empty list of compile targets.
     SlangWasmTargetList slang_wasm_target_list_create(void);
@@ -73,7 +74,7 @@ extern "C"
 
     void slang_wasm_target_list_destroy(SlangWasmTargetList list);
 
-    typedef uint32_t SlangWasmMacroList;
+    using SlangWasmMacroList = uint32_t;
 
     // Create an empty list of preprocessor macro definitions.
     SlangWasmMacroList slang_wasm_macro_list_create(void);
@@ -88,7 +89,7 @@ extern "C"
 
     void slang_wasm_macro_list_destroy(SlangWasmMacroList list);
 
-    typedef uint32_t SlangWasmPathList;
+    using SlangWasmPathList = uint32_t;
 
     // Create an empty list of module search paths.
     SlangWasmPathList slang_wasm_path_list_create(void);
@@ -97,7 +98,7 @@ extern "C"
 
     void slang_wasm_path_list_destroy(SlangWasmPathList list);
 
-    typedef uint32_t SlangWasmOptions;
+    using SlangWasmOptions = uint32_t;
 
     // Create an empty list of session-wide compiler option entries
     // (slang::CompilerOptionEntry), keyed by SlangCompilerOptionName.
@@ -115,14 +116,11 @@ extern "C"
 
     // ── Session ───────────────────────────────────────────────────────────────────
 
-    typedef uint32_t SlangWasmSession;
+    using SlangWasmSession = uint32_t;
 
     // Create a compile session configured for one target format. `targetFormat` is
     // a SlangCompileTarget enum value (e.g. SLANG_SPIRV). `profile` may be NULL or
     // empty to accept the target's default profile. Returns 0 on failure.
-    //
-    // Thin convenience wrapper over slang_wasm_session_create2 for the common
-    // single-target, no-macros, no-search-paths case.
     SlangWasmSession slang_wasm_session_create(
         uint32_t targetFormat,
         const char* profile,
@@ -148,24 +146,22 @@ extern "C"
     //
     // A module is parsed once and can then be queried for its defined entry points
     // and compiled from independently of any other module loaded into the same
-    // session, unlike slang_wasm_compile (below) which loads, compiles, and
-    // discards a module in one call.
+    // session, unlike slang_wasm_compile which loads, compiles, and discards a
+    // module in one call.
 
-    typedef uint32_t SlangWasmModule;
+    using SlangWasmModule = uint32_t;
+
     // Forward declaration: SlangWasmResult is defined fully in the "Compilation"
     // section below, but slang_wasm_module_serialize (a module-handle operation)
     // needs the type here too.
-    typedef uint32_t SlangWasmResult;
+    using SlangWasmResult = uint32_t;
 
-    // Load `source` as module `name` into `session` (mirrors
-    // ISession::loadModuleFromSourceString). Returns 0 on failure. `diagPtrOut`/
+    // Load `source` as module `name` into `session`. Returns 0 on failure. `diagPtrOut`/
     // `diagLenOut` (each a pointer into the module's own linear memory, e.g. from
     // slang_wasm_alloc) are always written — to a NULL/0 buffer if there were no
     // diagnostics, or to a freshly heap-allocated UTF-8 buffer (owned by the
     // caller; free with slang_wasm_free) otherwise. This is true on both success
-    // (warnings) and failure (errors), unlike slang_wasm_compile's diagnostics
-    // which are only retrievable via a result handle that does not exist when
-    // there is no module to return.
+    // (warnings) and failure (errors).
     SlangWasmModule slang_wasm_session_load_module(
         SlangWasmSession session,
         const char* name,
@@ -179,8 +175,7 @@ extern "C"
     void slang_wasm_module_destroy(SlangWasmModule module);
 
     // Number of entry points defined in the module (functions marked
-    // `[shader("...")]`), per IModule::getDefinedEntryPointCount. Returns 0
-    // for an unknown module handle.
+    // `[shader("...")]`). Returns 0 for an unknown module handle.
     uint32_t slang_wasm_module_entry_point_count(SlangWasmModule module);
 
     // Pointer and byte length of the name of the entry point at `index`
@@ -190,17 +185,16 @@ extern "C"
     uint32_t slang_wasm_module_entry_point_name_ptr(SlangWasmModule module, uint32_t index);
     uint32_t slang_wasm_module_entry_point_name_len(SlangWasmModule module, uint32_t index);
 
-    // Serialise `module`'s checked IR to a precompiled binary blob (mirrors
-    // IModule::serialize), so it can be cached and reloaded later via
-    // slang_wasm_session_load_module_ir without re-parsing or re-checking the
-    // original source. On success, the result's code_ptr/code_len (see the result
-    // accessors below) hold the IR bytes; reflection_json/diagnostics are unused.
-    // Never throws.
+    // Serialise `module`'s checked IR to a precompiled binary blob,
+    // so it can be cached and reloaded later via slang_wasm_session_load_module_ir
+    // without re-parsing or re-checking the original source. On success, the
+    // result's code_ptr/code_len hold the IR bytes; reflection_json/diagnostics are
+    // unused. Never throws.
     SlangWasmResult slang_wasm_module_serialize(SlangWasmModule module);
 
     // Load a precompiled IR blob (as produced by slang_wasm_module_serialize) back
-    // as a module (mirrors ISession::loadModuleFromIRBlob). Returns 0 on failure.
-    // `diagPtrOut`/`diagLenOut` behave exactly as in slang_wasm_session_load_module.
+    // as a module. Returns 0 on failure. `diagPtrOut`/`diagLenOut` behave exactly
+    // as in slang_wasm_session_load_module.
     SlangWasmModule slang_wasm_session_load_module_ir(
         SlangWasmSession session,
         const char* name,
@@ -212,14 +206,14 @@ extern "C"
 
     // ── Specialization ────────────────────────────────────────────────────────────
     //
-    // Specialize a generic shader for concrete types/values before compiling
-    // (mirrors IComponentType::specialize). Type conformance / dynamic dispatch
+    // Specialize a generic shader for concrete types/values before compiling.
+    // Type conformance / dynamic dispatch
     // (ISession::createTypeConformanceComponentType) is not yet implemented:
     // composing ITypeConformance component types for existential/dynamic
     // dispatch is a separable feature with its own API surface, left for when
     // a concrete need for it arises.
 
-    typedef uint32_t SlangWasmSpecArgs;
+    using SlangWasmSpecArgs = uint32_t;
 
     // Create an empty list of specialization arguments.
     SlangWasmSpecArgs slang_wasm_spec_args_create(void);
@@ -252,19 +246,18 @@ extern "C"
 
     // ── Declaration reflection ────────────────────────────────────────────────────
 
-    // Serialise `module`'s module-level declaration tree (mirrors
-    // IModule::getModuleReflection): every struct, function, variable, enum,
-    // namespace, and generic declared at module scope, recursively — without
-    // compiling to any target. On success, the result's reflection_json (see the
-    // result accessors below) holds the JSON tree; code/diagnostics are unused on
-    // success. Never throws.
+    // Serialise `module`'s module-level declaration tree: every struct, function,
+    // variable, enum, namespace, and generic declared at module scope, recursively
+    // — without compiling to any target. On success, the result's reflection_json
+    // (see the result accessors below) holds the JSON tree; code/diagnostics are
+    // unused on success. Never throws.
     SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModule module);
 
-    // Disassemble `module`'s checked IR to human-readable text (mirrors
-    // IModule::disassemble). On success, the result's diagnostics_ptr/len (see the
-    // result accessors below) hold the disassembly text — reusing that field for
-    // "the text I asked for" rather than adding a fifth WasmResult field for one
-    // caller; code/reflection_json are unused. Never throws.
+    // Disassemble `module`'s checked IR to human-readable text. On success, the
+    // result's diagnostics_ptr/len (see the result accessors below) hold the
+    // disassembly text — reusing that field for "the text I asked for" rather
+    // than adding a fifth WasmResult field for one caller; code/reflection_json
+    // are unused. Never throws.
     SlangWasmResult slang_wasm_module_disassemble(SlangWasmModule module);
 
     // ── Compilation ───────────────────────────────────────────────────────────────
@@ -300,11 +293,11 @@ extern "C"
 
     // Compile all of `module`'s defined entry points together into one combined
     // code blob for the target at `targetIndex`, using the session `module` was
-    // loaded into (mirrors IComponentType::getTargetCode, which — unlike
-    // getEntryPointCode — returns a single blob containing every entry point
-    // linked into the component, e.g. one SPIR-V module with both a vertex and a
-    // fragment entry point). Reflection JSON in the result covers the same
-    // combined layout. Same never-throws contract as slang_wasm_compile.
+    // loaded into. Unlike compiling a single entry point, this returns one blob
+    // containing every entry point linked into the component, e.g. one SPIR-V
+    // module with both a vertex and a fragment entry point. Reflection JSON in
+    // the result covers the same combined layout. Same never-throws contract as
+    // slang_wasm_compile.
     SlangWasmResult slang_wasm_compile_module(SlangWasmModule module, uint32_t targetIndex);
 
     // ── Result accessors ──────────────────────────────────────────────────────────
@@ -344,3 +337,5 @@ extern "C"
 #ifdef __cplusplus
 } // extern "C"
 #endif
+
+#endif // SLANG_WASM_WASI_H

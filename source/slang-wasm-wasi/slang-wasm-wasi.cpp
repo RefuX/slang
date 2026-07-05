@@ -21,44 +21,29 @@
 #include "../core/slang-type-text-util.h"
 #include "../slang/slang-profile.h"
 
-#include <cassert>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <memory>
 #include <slang-com-ptr.h>
 #include <slang-deprecated.h>
 #include <slang.h>
+#include <stdlib.h>
+#include <string.h>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-// A hard WASM trap for an out-of-contract handle passed to a builder
-// mutator (target/macro/path/options list _add, spec_args _add_*): the
-// handle is one the caller just created via the matching _create call, so
-// passing a stale or wrong one is a pure caller bug with no legitimate way
-// to arise from normal use, not a recoverable runtime condition — and these
-// functions have no result object to hang a diagnostic off of anyway. Once
-// past that check, each mutator still wraps its own body in try/catch (like
-// every other entry point below) to swallow a thrown Slang exception or
-// std::bad_alloc rather than let it become a WASM trap too — only the
-// handle itself is a caller-contract violation worth trapping on.
-// Every other entry point either wraps its body in try/catch and uses
-// SLANG_RELEASE_ASSERT instead (its failure throws a Slang exception, which
-// the surrounding catch (...) converts into a failed result rather than
-// destroying the instance), or is a simple accessor that returns a 0/empty
-// sentinel on an unknown handle instead of asserting at all. (SLANG_ASSERT/
-// SLANG_RELEASE_ASSERT are available here despite this being a
-// public-header-only shim: slang-blob.h transitively includes
-// slang-common.h, which defines them, and `core` is already linked.)
-#define WASM_ASSERT(cond)     \
-    do                        \
-    {                         \
-        if (!(cond))          \
-        {                     \
-            __builtin_trap(); \
-        }                     \
+// Traps on an out-of-contract handle in a builder mutator (target/macro/path/
+// options list _add, spec_args _add_*): the handle should come from the
+// matching _create call, so a stale/wrong one is a pure caller bug, not a
+// recoverable condition. Other entry points use SLANG_RELEASE_ASSERT +
+// try/catch, or return a 0/empty sentinel, instead of trapping.
+#define SLANG_WASM_ASSERT(cond) \
+    do                          \
+    {                           \
+        if (!(cond))            \
+        {                       \
+            __builtin_trap();   \
+        }                       \
     } while (0)
 
 using Slang::ComPtr;
@@ -173,7 +158,7 @@ static uint32_t insertHandle(
     uint32_t* nextHandle,
     T* value)
 {
-    uint32_t handle = (*nextHandle)++;
+    const uint32_t handle = (*nextHandle)++;
     table[handle] = value;
     return handle;
 }
@@ -215,8 +200,8 @@ static bool ensureGlobalSession()
 {
     if (g_globalSession)
         return true;
-    SlangGlobalSessionDesc desc = {};
-    SlangResult r = slang_createGlobalSession2(&desc, g_globalSession.writeRef());
+    const SlangGlobalSessionDesc desc = {};
+    const SlangResult r = slang_createGlobalSession2(&desc, g_globalSession.writeRef());
     return SLANG_SUCCEEDED(r);
 }
 
@@ -240,14 +225,14 @@ static void appendBlob(std::string& out, slang::IBlob* blob)
 // which are not valid JSON syntax, whereas Style::JSON emits \uXXXX.
 static void emitDeclReflectionJson(slang::DeclReflection* decl, Slang::PrettyWriter& writer)
 {
-    auto jsonHandler = Slang::StringEscapeUtil::getHandler(Slang::StringEscapeUtil::Style::JSON);
+    auto* jsonHandler = Slang::StringEscapeUtil::getHandler(Slang::StringEscapeUtil::Style::JSON);
 
     writer << "{\"name\":";
     Slang::StringEscapeUtil::appendQuoted(
         jsonHandler,
         Slang::UnownedStringSlice(decl->getName()),
         writer.getBuilder());
-    writer << ",\"kind\":\"";
+    writer << R"(,"kind":")";
     switch (decl->getKind())
     {
     case slang::DeclReflection::Kind::Struct:
@@ -277,7 +262,7 @@ static void emitDeclReflectionJson(slang::DeclReflection* decl, Slang::PrettyWri
     }
     writer << "\"";
 
-    unsigned int childCount = decl->getChildrenCount();
+    const unsigned int childCount = decl->getChildrenCount();
     if (childCount > 0)
     {
         // A plain indexed comma join, matching the sibling "fields" array
@@ -315,7 +300,7 @@ static void writeDiagOut(slang::IBlob* blob, uint32_t* diagPtrOut, uint32_t* dia
         *diagLenOut = 0;
         return;
     }
-    size_t size = blob->getBufferSize();
+    const size_t size = blob->getBufferSize();
     void* buf = malloc(size);
     if (!buf)
     {
@@ -367,7 +352,7 @@ static void linkAndGetCode(
     if (SLANG_FAILED(r) || !codeBlob)
         return;
 
-    const uint8_t* codePtr = static_cast<const uint8_t*>(codeBlob->getBufferPointer());
+    const auto* codePtr = static_cast<const uint8_t*>(codeBlob->getBufferPointer());
     result->code.assign(codePtr, codePtr + codeBlob->getBufferSize());
 
     // Serialize reflection to JSON.
@@ -407,7 +392,7 @@ static void linkCompileAndReflect(
 {
     ComPtr<slang::IComponentType> composite;
     ComPtr<slang::IBlob> diagBlob;
-    SlangResult r = session->createCompositeComponentType(
+    const SlangResult r = session->createCompositeComponentType(
         components,
         componentCount,
         composite.writeRef(),
@@ -442,7 +427,7 @@ extern "C" int32_t slang_wasm_target_from_string(const char* name, uint32_t name
     // enum metadata blob: this recognizes every alias the real compiler does
     // (e.g. both "spv" and "spirv" name SLANG_SPIRV), not just the single
     // name mechanically derived from the C++ enumerator's spelling.
-    SlangCompileTarget target =
+    const SlangCompileTarget target =
         Slang::TypeTextUtil::findCompileTargetFromName(Slang::UnownedStringSlice(name, nameLen));
     return target == SLANG_TARGET_UNKNOWN ? -1 : static_cast<int32_t>(target);
 }
@@ -454,7 +439,7 @@ extern "C" int32_t slang_wasm_stage_from_string(const char* name, uint32_t nameL
     // Delegate to the same name table that backs the compiler's own `-stage`
     // command-line flag, for the same reason as slang_wasm_target_from_string
     // above.
-    Slang::Stage stage =
+    const Slang::Stage stage =
         Slang::findStageByName(Slang::String(Slang::UnownedStringSlice(name, nameLen)));
     return stage == Slang::Stage::Unknown ? -1 : static_cast<int32_t>(stage);
 }
@@ -474,14 +459,10 @@ extern "C" void slang_wasm_target_list_add(
     uint32_t flags)
 {
     auto it = g_targetLists.find(listHandle);
-    WASM_ASSERT(it != g_targetLists.end());
+    SLANG_WASM_ASSERT(it != g_targetLists.end());
 
-    // Unlike the WASM_ASSERT above (a pure caller-contract violation, correct
-    // to trap on), ensureGlobalSession()/spFindProfile() call into the Slang
-    // C++ API and can throw under the default SLANG_ASSERT behavior. Catch
-    // that here rather than let it cross the extern "C" boundary as a WASM
-    // trap; there is no result object to report the failure through, so the
-    // target is simply dropped from the list.
+    // ensureGlobalSession()/spFindProfile() can throw; catch it here (no result
+    // object exists to report through) and just drop the target.
     try
     {
         ensureGlobalSession();
@@ -491,7 +472,7 @@ extern "C" void slang_wasm_target_list_add(
         target.flags = static_cast<SlangTargetFlags>(flags);
         if (profile && profileLen > 0 && g_globalSession)
         {
-            std::string profileStr(profile, profileLen);
+            const std::string profileStr(profile, profileLen);
             target.profile = spFindProfile(g_globalSession, profileStr.c_str());
         }
         it->second->targets.push_back(target);
@@ -519,7 +500,7 @@ extern "C" void slang_wasm_macro_list_add(
     uint32_t valueLen)
 {
     auto it = g_macroLists.find(listHandle);
-    WASM_ASSERT(it != g_macroLists.end());
+    SLANG_WASM_ASSERT(it != g_macroLists.end());
     try
     {
         it->second->entries.emplace_back(toStr(name, nameLen), toStr(value, valueLen));
@@ -545,7 +526,7 @@ extern "C" void slang_wasm_path_list_add(
     uint32_t pathLen)
 {
     auto it = g_pathLists.find(listHandle);
-    WASM_ASSERT(it != g_pathLists.end());
+    SLANG_WASM_ASSERT(it != g_pathLists.end());
     try
     {
         it->second->paths.push_back(toStr(path, pathLen));
@@ -572,7 +553,7 @@ extern "C" void slang_wasm_options_add_string(
     uint32_t valLen)
 {
     auto it = g_optionLists.find(optsHandle);
-    WASM_ASSERT(it != g_optionLists.end());
+    SLANG_WASM_ASSERT(it != g_optionLists.end());
     try
     {
         WasmOptionEntry entry;
@@ -589,7 +570,7 @@ extern "C" void slang_wasm_options_add_string(
 extern "C" void slang_wasm_options_add_int(SlangWasmOptions optsHandle, uint32_t name, int32_t val)
 {
     auto it = g_optionLists.find(optsHandle);
-    WASM_ASSERT(it != g_optionLists.end());
+    SLANG_WASM_ASSERT(it != g_optionLists.end());
     try
     {
         WasmOptionEntry entry;
@@ -635,7 +616,7 @@ extern "C" SlangWasmSession slang_wasm_session_create2(
         {
             macroDescs.reserve(macros->entries.size());
             for (auto& kv : macros->entries)
-                macroDescs.push_back({kv.first.c_str(), kv.second.c_str()});
+                macroDescs.push_back({.name = kv.first.c_str(), .value = kv.second.c_str()});
         }
 
         std::vector<const char*> pathPtrs;
@@ -688,7 +669,7 @@ extern "C" SlangWasmSession slang_wasm_session_create2(
         }
 
         ComPtr<slang::ISession> session;
-        SlangResult r = g_globalSession->createSession(sessionDesc, session.writeRef());
+        const SlangResult r = g_globalSession->createSession(sessionDesc, session.writeRef());
         if (SLANG_FAILED(r))
             return 0;
 
@@ -705,7 +686,7 @@ extern "C" SlangWasmSession slang_wasm_session_create(
     const char* profile,
     uint32_t profileLen)
 {
-    SlangWasmTargetList targets = slang_wasm_target_list_create();
+    const SlangWasmTargetList targets = slang_wasm_target_list_create();
     slang_wasm_target_list_add(targets, targetFormat, profile, profileLen, 0);
     return slang_wasm_session_create2(targets, 0, 0, 0);
 }
@@ -725,10 +706,10 @@ extern "C" void slang_wasm_session_destroy(SlangWasmSession handle)
 static SlangWasmModule makeWasmModule(ComPtr<slang::ISession> session, slang::IModule* module)
 {
     auto* wasmModule = new WasmModule();
-    wasmModule->session = session;
+    wasmModule->session = std::move(session);
     wasmModule->module = module;
 
-    SlangInt32 entryPointCount = module->getDefinedEntryPointCount();
+    const SlangInt32 entryPointCount = module->getDefinedEntryPointCount();
     for (SlangInt32 i = 0; i < entryPointCount; ++i)
     {
         ComPtr<slang::IEntryPoint> entryPoint;
@@ -736,7 +717,7 @@ static SlangWasmModule makeWasmModule(ComPtr<slang::ISession> session, slang::IM
         {
             slang::FunctionReflection* funcReflection = entryPoint->getFunctionReflection();
             const char* name = funcReflection ? funcReflection->getName() : nullptr;
-            wasmModule->entryPointNames.push_back(name ? name : "");
+            wasmModule->entryPointNames.emplace_back(name ? name : "");
             wasmModule->entryPoints.push_back(std::move(entryPoint));
         }
     }
@@ -757,10 +738,10 @@ extern "C" SlangWasmModule slang_wasm_session_load_module(
     {
         auto sessionIt = g_sessions.find(sessionHandle);
         SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
-        ComPtr<slang::ISession> session = sessionIt->second->session;
+        const ComPtr<slang::ISession> session = sessionIt->second->session;
 
-        std::string nameStr = toStr(name, nameLen);
-        std::string sourceStr = toStr(source, sourceLen);
+        const std::string nameStr = toStr(name, nameLen);
+        const std::string sourceStr = toStr(source, sourceLen);
 
         ComPtr<slang::IBlob> diagBlob;
         slang::IModule* module = session->loadModuleFromSourceString(
@@ -822,7 +803,7 @@ extern "C" uint32_t slang_wasm_module_entry_point_name_len(SlangWasmModule handl
 extern "C" SlangWasmResult slang_wasm_module_serialize(SlangWasmModule moduleHandle)
 {
     auto* result = new WasmResult();
-    uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
 
     try
     {
@@ -831,14 +812,14 @@ extern "C" SlangWasmResult slang_wasm_module_serialize(SlangWasmModule moduleHan
         slang::IModule* module = moduleIt->second->module;
 
         ComPtr<slang::IBlob> irBlob;
-        SlangResult r = module->serialize(irBlob.writeRef());
+        const SlangResult r = module->serialize(irBlob.writeRef());
         if (SLANG_FAILED(r) || !irBlob)
         {
             result->diagnostics = "[slang-wasm-wasi] IModule::serialize failed";
             return resultHandle;
         }
 
-        const uint8_t* irPtr = static_cast<const uint8_t*>(irBlob->getBufferPointer());
+        const auto* irPtr = static_cast<const uint8_t*>(irBlob->getBufferPointer());
         result->code.assign(irPtr, irPtr + irBlob->getBufferSize());
         result->succeeded = true;
         return resultHandle;
@@ -864,10 +845,10 @@ extern "C" SlangWasmModule slang_wasm_session_load_module_ir(
     {
         auto sessionIt = g_sessions.find(sessionHandle);
         SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
-        ComPtr<slang::ISession> session = sessionIt->second->session;
+        const ComPtr<slang::ISession> session = sessionIt->second->session;
 
-        std::string nameStr = toStr(name, nameLen);
-        ComPtr<slang::IBlob> sourceBlob = Slang::RawBlob::create(irBlob, irLen);
+        const std::string nameStr = toStr(name, nameLen);
+        const ComPtr<slang::IBlob> sourceBlob = Slang::RawBlob::create(irBlob, irLen);
         if (!sourceBlob)
         {
             // RawBlob::create returns null both for a (null, len>0) argument
@@ -909,10 +890,10 @@ extern "C" void slang_wasm_spec_args_add_type(
     uint32_t typeNameLen)
 {
     auto it = g_specArgsLists.find(argsHandle);
-    WASM_ASSERT(it != g_specArgsLists.end());
+    SLANG_WASM_ASSERT(it != g_specArgsLists.end());
     try
     {
-        it->second->entries.push_back({true, toStr(typeName, typeNameLen)});
+        it->second->entries.push_back({.isType = true, .value = toStr(typeName, typeNameLen)});
     }
     catch (...)
     {
@@ -925,10 +906,10 @@ extern "C" void slang_wasm_spec_args_add_expr(
     uint32_t exprLen)
 {
     auto it = g_specArgsLists.find(argsHandle);
-    WASM_ASSERT(it != g_specArgsLists.end());
+    SLANG_WASM_ASSERT(it != g_specArgsLists.end());
     try
     {
-        it->second->entries.push_back({false, toStr(expr, exprLen)});
+        it->second->entries.push_back({.isType = false, .value = toStr(expr, exprLen)});
     }
     catch (...)
     {
@@ -948,7 +929,7 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
     uint32_t targetIndex)
 {
     auto* result = new WasmResult();
-    uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
 
     // Consumed exactly once, on every return path.
     std::unique_ptr<WasmSpecArgs> specArgs(takeHandle(g_specArgsLists, specArgsHandle));
@@ -960,7 +941,7 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
         slang::ISession* session = moduleIt->second->session.get();
         slang::IModule* module = moduleIt->second->module;
 
-        std::string entryNameStr = toStr(entryName, entryNameLen);
+        const std::string entryNameStr = toStr(entryName, entryNameLen);
         ComPtr<slang::IEntryPoint> entryPoint;
         SlangResult r = module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
         if (SLANG_FAILED(r) || !entryPoint)
@@ -1049,7 +1030,7 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
 extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModule moduleHandle)
 {
     auto* result = new WasmResult();
-    uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
 
     try
     {
@@ -1083,7 +1064,7 @@ extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModul
 extern "C" SlangWasmResult slang_wasm_module_disassemble(SlangWasmModule moduleHandle)
 {
     auto* result = new WasmResult();
-    uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
 
     try
     {
@@ -1092,7 +1073,7 @@ extern "C" SlangWasmResult slang_wasm_module_disassemble(SlangWasmModule moduleH
         slang::IModule* module = moduleIt->second->module;
 
         ComPtr<slang::IBlob> disasmBlob;
-        SlangResult r = module->disassemble(disasmBlob.writeRef());
+        const SlangResult r = module->disassemble(disasmBlob.writeRef());
         if (SLANG_FAILED(r) || !disasmBlob)
         {
             result->diagnostics = "[slang-wasm-wasi] IModule::disassemble failed";
@@ -1124,7 +1105,7 @@ extern "C" SlangWasmResult slang_wasm_compile(
     uint32_t targetIndex)
 {
     auto* result = new WasmResult();
-    uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
 
     try
     {
@@ -1132,9 +1113,9 @@ extern "C" SlangWasmResult slang_wasm_compile(
         SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
         slang::ISession* session = sessionIt->second->session.get();
 
-        std::string moduleNameStr = toStr(moduleName, moduleNameLen);
-        std::string sourceStr = toStr(source, sourceLen);
-        std::string entryNameStr = toStr(entryName, entryNameLen);
+        const std::string moduleNameStr = toStr(moduleName, moduleNameLen);
+        const std::string sourceStr = toStr(source, sourceLen);
+        const std::string entryNameStr = toStr(entryName, entryNameLen);
 
         // Step 1: load the module from the source string.
         ComPtr<slang::IBlob> diagBlob;
@@ -1150,7 +1131,8 @@ extern "C" SlangWasmResult slang_wasm_compile(
         // Step 2: find the entry point.
         ComPtr<slang::IEntryPoint> entryPoint;
         diagBlob = nullptr;
-        SlangResult r = module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
+        const SlangResult r =
+            module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
         if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
@@ -1174,7 +1156,7 @@ extern "C" SlangWasmResult slang_wasm_compile_entry_point(
     uint32_t targetIndex)
 {
     auto* result = new WasmResult();
-    uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
 
     try
     {
@@ -1183,10 +1165,11 @@ extern "C" SlangWasmResult slang_wasm_compile_entry_point(
         slang::ISession* session = moduleIt->second->session.get();
         slang::IModule* module = moduleIt->second->module;
 
-        std::string entryNameStr = toStr(entryName, entryNameLen);
+        const std::string entryNameStr = toStr(entryName, entryNameLen);
 
         ComPtr<slang::IEntryPoint> entryPoint;
-        SlangResult r = module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
+        const SlangResult r =
+            module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
         if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
@@ -1207,7 +1190,7 @@ extern "C" SlangWasmResult slang_wasm_compile_module(
     uint32_t targetIndex)
 {
     auto* result = new WasmResult();
-    uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
 
     try
     {

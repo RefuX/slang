@@ -31,7 +31,7 @@ namespace Slang
     RefPtr<Process>& /* outProcess */)
 {
     // Process spawning is not available on WASI.
-    return SLANG_FAIL;
+    return SLANG_E_NOT_IMPLEMENTED;
 }
 
 /* static */ uint64_t Process::getClockFrequency()
@@ -48,21 +48,12 @@ namespace Slang
 
 /* static */ void Process::sleepCurrentThread(Int timeInMs)
 {
-    struct timespec ts;
-    if (timeInMs >= 1000)
-    {
-        ts.tv_sec = timeInMs / 1000;
-        ts.tv_nsec = (timeInMs % 1000) * 1000000;
-    }
-    else if (timeInMs > 0)
-    {
-        ts.tv_sec = 0;
-        ts.tv_nsec = timeInMs * 1000000;
-    }
-    else
-    {
+    if (timeInMs <= 0)
         return;
-    }
+
+    struct timespec ts;
+    ts.tv_sec = timeInMs / 1000;
+    ts.tv_nsec = (timeInMs % 1000) * 1000000;
     nanosleep(&ts, nullptr);
 }
 

@@ -201,10 +201,9 @@ jobs:
       config: release
       runs-on: ${{ vars.LINUX_BUILD_RUNS_ON || '["ubuntu-22.04"]' }}
 
-  # WASI build (slang-wasm-wasi): same rationale and runner selection as the
+  # WASI build (slang-wasm-wasi): the same rationale and runner selection as the
   # Emscripten build above, but wasi-sdk is downloaded directly (curl+tar)
-  # instead of via emsdk. Runs a functional smoke test via wasmtime-py — see
-  # ci-slang-build.yml's wasi branch and tests/wasm-wasi/smoke/smoke-test.py.
+  # instead of via emsdk.
   build-linux-release-gcc-wasi:
     needs: [filter, wait-for-human-priority]
     if: >-

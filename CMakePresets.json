@@ -40,7 +40,7 @@
     },
     {
       "name": "wasi",
-      "description": "WASI reactor build via wasi-sdk (no Emscripten); produces slang-wasm-wasi.wasm",
+      "description": "WASI reactor build via wasi-sdk; produces slang-wasm-wasi.wasm",
       "generator": "Ninja Multi-Config",
       "binaryDir": "${sourceDir}/build.wasi",
       "toolchainFile": "$env{WASI_SDK_PATH}/share/cmake/wasi-sdk.cmake",

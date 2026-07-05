@@ -193,9 +193,7 @@ jobs:
             cmake -DSLANG_GENERATORS_PATH=generators/bin --preset wasi
             cmake --build --preset slang-wasm-wasi --config "$cmake_config"
             [ -f "build.wasi/$cmake_config/bin/slang-wasm-wasi.wasm" ]
-            # Pin wasmtime to a known-good version, same rationale as the
-            # emsdk/wasi-sdk pins above: an unpinned `latest` could silently
-            # break this smoke test on an unrelated wasmtime release.
+            # Pin wasmtime to a known-good version.
             python3 -m pip install --quiet "wasmtime==46.0.1"
             mkdir "build.wasi/$cmake_config/bin/smoke"
             cp tests/wasm-wasi/smoke/* "build.wasi/$cmake_config/bin/smoke/"
