@@ -179,6 +179,8 @@ jobs:
             [ -f "slang-wasm.js" ]
             node smoke/smoke-test.js smoke/rand_float.slang computeMain
           elif [[ "${{ inputs.platform }}" == "wasi" ]]; then
+            # Unit-test the enum-metadata generator.
+            python3 source/slang-wasm-wasi/tools/test_generate_slang_bindings.py -v
             # Pin wasi-sdk to a known-good version, matching docs/building.md's
             # WASI-SDK Build section, for the same reason the emsdk install
             # above is pinned: an unpinned "latest" could silently break this
