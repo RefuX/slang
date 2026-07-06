@@ -16,7 +16,9 @@ endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(_slang_h "${slang_SOURCE_DIR}/include/slang.h")
-set(_enum_meta_cpp "${CMAKE_CURRENT_SOURCE_DIR}/slang-wasm-wasi-enum-metadata.cpp")
+set(_enum_meta_cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/slang-wasm-wasi-enum-metadata.cpp"
+)
 
 if(${_slang_h} IS_NEWER_THAN ${_enum_meta_cpp})
     message(STATUS "slang-wasm-wasi: regenerating enum bindings from slang.h")
@@ -39,7 +41,11 @@ endif()
 # sysroot subdirectory holds the EH-aware variant.
 set(WASI_EH_LIB_DIR "${CMAKE_SYSROOT}/lib/wasm32-wasip1/eh")
 
-add_executable(slang-wasm-wasi slang-wasm-wasi.cpp slang-wasm-wasi-enum-metadata.cpp)
+add_executable(
+    slang-wasm-wasi
+    slang-wasm-wasi.cpp
+    slang-wasm-wasi-enum-metadata.cpp
+)
 
 set_target_properties(
     slang-wasm-wasi
