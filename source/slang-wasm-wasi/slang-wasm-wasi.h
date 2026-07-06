@@ -204,14 +204,41 @@ extern "C"
         uint32_t* diagPtrOut,
         uint32_t* diagLenOut);
 
+    // ── Type conformance ──────────────────────────────────────────────────────────
+    //
+    // Explicitly control which concrete types conform to an interface for a
+    // compile, and read back the dispatch ID Slang assigns each one (for tagging
+    // runtime instance data). A 0/empty handle passed to the compile functions
+    // below means "no explicit list": Slang then only finds types it can discover
+    // by static analysis (e.g. in-shader branching) — for an interface consumed
+    // only through a host-bound resource (e.g. `ParameterBlock<IMaterial>`),
+    // that's nothing, and the compile fails until at least one conformance is added.
+
+    using SlangWasmTypeConformances = uint32_t;
+
+    // Create an empty list of type conformances bound to `module`. Unlike
+    // SlangWasmSpecArgs, resolution happens immediately in
+    // slang_wasm_type_conformances_add, not deferred to compile time. Returns 0
+    // for an unknown module handle.
+    SlangWasmTypeConformances slang_wasm_type_conformances_create(SlangWasmModule module);
+
+    // Register that `concreteTypeName` conforms to `interfaceTypeName`, resolved
+    // against `module`'s layout. `conformanceIdOverride` may be -1 to auto-assign
+    // the dispatch ID, or a non-negative value to pin it. Returns the assigned
+    // dispatch ID, or -1 if either name is unresolvable or the type doesn't conform.
+    int32_t slang_wasm_type_conformances_add(
+        SlangWasmTypeConformances conformances,
+        const char* concreteTypeName,
+        uint32_t concreteTypeNameLen,
+        const char* interfaceTypeName,
+        uint32_t interfaceTypeNameLen,
+        int32_t conformanceIdOverride);
+
+    void slang_wasm_type_conformances_destroy(SlangWasmTypeConformances conformances);
+
     // ── Specialization ────────────────────────────────────────────────────────────
     //
     // Specialize a generic shader for concrete types/values before compiling.
-    // Type conformance / dynamic dispatch
-    // (ISession::createTypeConformanceComponentType) is not yet implemented:
-    // composing ITypeConformance component types for existential/dynamic
-    // dispatch is a separable feature with its own API surface, left for when
-    // a concrete need for it arises.
 
     using SlangWasmSpecArgs = uint32_t;
 
@@ -234,15 +261,19 @@ extern "C"
     // Find entry point `entryName` in `module`, specialize it with `args` (in
     // argument-list order, matching the generic parameter declaration order), then
     // link and compile for the target at `targetIndex`, using the session `module`
-    // was loaded into (see slang_wasm_session_load_module). Consumes (destroys)
-    // `args` before returning, success or not. Never throws: internal aborts are
-    // caught and returned as a failed result with diagnostics text.
+    // was loaded into (see slang_wasm_session_load_module). `typeConformances` may
+    // be 0 or a handle from slang_wasm_type_conformances_add (see "Type
+    // conformance" above); unlike `args`, it is not consumed and may be reused
+    // across compiles. Consumes (destroys) `args` before returning, success or
+    // not. Never throws: internal aborts are caught and returned as a failed
+    // result with diagnostics text.
     SlangWasmResult slang_wasm_compile_specialized_entry_point(
         SlangWasmModule module,
         const char* entryName,
         uint32_t entryNameLen,
         SlangWasmSpecArgs args,
-        uint32_t targetIndex);
+        uint32_t targetIndex,
+        SlangWasmTypeConformances typeConformances);
 
     // ── Declaration reflection ────────────────────────────────────────────────────
 
@@ -281,24 +312,31 @@ extern "C"
 
     // Compile entry point `entryName` from an already-loaded `module` (see
     // slang_wasm_session_load_module), producing code for the target at
-    // `targetIndex`, using the session `module` was loaded into. Equivalent to
-    // slang_wasm_compile but reuses a module already parsed once, so multiple
-    // entry points from the same source can be compiled independently without
-    // re-parsing. Same never-throws contract as slang_wasm_compile.
+    // `targetIndex`, using the session `module` was loaded into. `typeConformances`
+    // may be 0 or a handle from slang_wasm_type_conformances_add (see "Type
+    // conformance" above); not consumed, so may be reused across compiles.
+    // Equivalent to slang_wasm_compile but reuses a module already parsed once, so
+    // multiple entry points from the same source can be compiled independently
+    // without re-parsing. Same never-throws contract as slang_wasm_compile.
     SlangWasmResult slang_wasm_compile_entry_point(
         SlangWasmModule module,
         const char* entryName,
         uint32_t entryNameLen,
-        uint32_t targetIndex);
+        uint32_t targetIndex,
+        SlangWasmTypeConformances typeConformances);
 
     // Compile all of `module`'s defined entry points together into one combined
     // code blob for the target at `targetIndex`, using the session `module` was
-    // loaded into. Unlike compiling a single entry point, this returns one blob
-    // containing every entry point linked into the component, e.g. one SPIR-V
-    // module with both a vertex and a fragment entry point. Reflection JSON in
-    // the result covers the same combined layout. Same never-throws contract as
-    // slang_wasm_compile.
-    SlangWasmResult slang_wasm_compile_module(SlangWasmModule module, uint32_t targetIndex);
+    // loaded into. `typeConformances` behaves exactly as in
+    // slang_wasm_compile_entry_point. Unlike compiling a single entry point, this
+    // returns one blob containing every entry point linked into the component,
+    // e.g. one SPIR-V module with both a vertex and a fragment entry point.
+    // Reflection JSON in the result covers the same combined layout. Same
+    // never-throws contract as slang_wasm_compile.
+    SlangWasmResult slang_wasm_compile_module(
+        SlangWasmModule module,
+        uint32_t targetIndex,
+        SlangWasmTypeConformances typeConformances);
 
     // ── Result accessors ──────────────────────────────────────────────────────────
     //

@@ -145,7 +145,7 @@ def test_happy_path_and_module_lifecycle(abi: Abi, metadata: dict, source: str, 
     # slang_wasm_compile_entry_point is documented as "Equivalent to slang_wasm_compile"
     # for the same source/entry/target -- so on a deterministic backend the two code
     # blobs should be byte-identical.
-    via_module_result = abi.call("slang_wasm_compile_entry_point", module, entry_ptr, entry_len, 0)
+    via_module_result = abi.call("slang_wasm_compile_entry_point", module, entry_ptr, entry_len, 0, 0)
     via_module_succeeded, via_module_code, via_module_diag = read_result(abi, via_module_result)
     check(via_module_succeeded, f"slang_wasm_compile_entry_point failed:\n{via_module_diag}")
     check(
@@ -155,7 +155,7 @@ def test_happy_path_and_module_lifecycle(abi: Abi, metadata: dict, source: str, 
     )
     print("slang_wasm_compile_entry_point matches slang_wasm_compile: OK")
 
-    combined_result = abi.call("slang_wasm_compile_module", module, 0)
+    combined_result = abi.call("slang_wasm_compile_module", module, 0, 0)
     combined_succeeded, combined_code, combined_diag = read_result(abi, combined_result)
     check(combined_succeeded, f"slang_wasm_compile_module failed:\n{combined_diag}")
     check(len(combined_code) > 0, "slang_wasm_compile_module produced an empty code blob")
@@ -203,7 +203,7 @@ def test_happy_path_and_module_lifecycle(abi: Abi, metadata: dict, source: str, 
     check(reload_diag_len == 0, "unexpected diagnostics reloading a known-good IR blob")
 
     reloaded_compile_result = abi.call(
-        "slang_wasm_compile_entry_point", reloaded_module, entry_ptr, entry_len, 0
+        "slang_wasm_compile_entry_point", reloaded_module, entry_ptr, entry_len, 0, 0
     )
     reloaded_succeeded, reloaded_code, reloaded_diag = read_result(abi, reloaded_compile_result)
     check(reloaded_succeeded, f"compiling the IR-reloaded module failed:\n{reloaded_diag}")
@@ -390,7 +390,9 @@ def test_specialization(abi: Abi, metadata: dict, generic_source: str) -> None:
         args = abi.call("slang_wasm_spec_args_create")
         expr_ptr, expr_len = abi.alloc(value.encode("utf-8"))
         abi.call("slang_wasm_spec_args_add_expr", args, expr_ptr, expr_len)
-        result = abi.call("slang_wasm_compile_specialized_entry_point", module, entry_ptr, entry_len, args, 0)
+        result = abi.call(
+            "slang_wasm_compile_specialized_entry_point", module, entry_ptr, entry_len, args, 0, 0
+        )
         succeeded, code, diagnostics = read_result(abi, result)
         check(succeeded, f"specialized compile (x={value}) failed:\n{diagnostics}")
         check(len(code) > 0, f"specialized compile (x={value}) produced empty code")
@@ -408,6 +410,110 @@ def test_specialization(abi: Abi, metadata: dict, generic_source: str) -> None:
     abi.free(entry_ptr)
 
 
+def test_type_conformance(abi: Abi, metadata: dict, type_conformance_source: str) -> None:
+    """Compiling type_conformance.slang with zero explicit conformances must fail
+    (IMaterial is only reachable through a ParameterBlock, so Slang has nothing to
+    discover); trimming from three implementing types down to two must produce
+    different dispatch code, proving the conformance list took effect. An
+    unresolvable pair must fail (-1) without crashing the instance."""
+    spirv_target = metadata["Target"]["SPIRV"]
+    session = abi.call("slang_wasm_session_create", spirv_target, 0, 0)
+    check(session != 0, "slang_wasm_session_create failed")
+
+    module, load_diag = load_module(abi, session, "type_conformance", type_conformance_source)
+    check(module != 0, f"loading the type conformance fixture failed:\n{load_diag}")
+
+    def add_conformance(conformances: int, concrete: str, interface: str) -> int:
+        concrete_ptr, concrete_len = abi.alloc(concrete.encode("utf-8"))
+        interface_ptr, interface_len = abi.alloc(interface.encode("utf-8"))
+        assigned_id = abi.call(
+            "slang_wasm_type_conformances_add",
+            conformances,
+            concrete_ptr,
+            concrete_len,
+            interface_ptr,
+            interface_len,
+            -1,  # let Slang auto-assign the dispatch ID
+        )
+        abi.free(concrete_ptr)
+        abi.free(interface_ptr)
+        return assigned_id
+
+    # A valid conformance must resolve to a non-negative dispatch ID.
+    valid_conformances = abi.call("slang_wasm_type_conformances_create", module)
+    check(valid_conformances != 0, "slang_wasm_type_conformances_create failed")
+    assigned_id = add_conformance(valid_conformances, "AMaterial", "IMaterial")
+    check(assigned_id >= 0, f"expected a non-negative dispatch ID, got {assigned_id}")
+    print(f"type conformance: AMaterial conforms to IMaterial with dispatch ID {assigned_id}")
+
+    # An unresolvable pair must fail (-1) without trapping the instance.
+    bogus_id = add_conformance(valid_conformances, "NotARealType", "IMaterial")
+    check(bogus_id == -1, f"expected -1 for an unresolvable type, got {bogus_id}")
+
+    entry_ptr, entry_len = abi.alloc(b"computeMain")
+
+    # Zero conformances: nothing for Slang to discover, so this must fail.
+    no_conformance_result = abi.call(
+        "slang_wasm_compile_entry_point", module, entry_ptr, entry_len, 0, 0
+    )
+    no_conformance_succeeded, _, no_conformance_diag = read_result(abi, no_conformance_result)
+    check(
+        not no_conformance_succeeded,
+        "compiling with zero explicit type conformances unexpectedly succeeded",
+    )
+    check(
+        len(no_conformance_diag) > 0,
+        "compiling with zero explicit type conformances produced no diagnostics",
+    )
+    abi.call("slang_wasm_result_destroy", no_conformance_result)
+
+    # Full: all three implementing types conform.
+    full_conformances = abi.call("slang_wasm_type_conformances_create", module)
+    check(full_conformances != 0, "slang_wasm_type_conformances_create failed")
+    for type_name in ("AMaterial", "BMaterial", "CMaterial"):
+        full_id = add_conformance(full_conformances, type_name, "IMaterial")
+        check(full_id >= 0, f"expected a non-negative dispatch ID for {type_name}, got {full_id}")
+
+    full_result = abi.call(
+        "slang_wasm_compile_entry_point", module, entry_ptr, entry_len, 0, full_conformances
+    )
+    full_succeeded, full_code, full_diag = read_result(abi, full_result)
+    check(full_succeeded, f"full-conformance compile failed:\n{full_diag}")
+    check(len(full_code) > 0, "full-conformance compile produced empty code")
+
+    # Trimmed: only AMaterial and BMaterial conform; CMaterial is excluded.
+    trimmed_conformances = abi.call("slang_wasm_type_conformances_create", module)
+    check(trimmed_conformances != 0, "slang_wasm_type_conformances_create failed")
+    a_id = add_conformance(trimmed_conformances, "AMaterial", "IMaterial")
+    b_id = add_conformance(trimmed_conformances, "BMaterial", "IMaterial")
+    check(a_id >= 0 and b_id >= 0, f"expected non-negative dispatch IDs, got {a_id}, {b_id}")
+    check(a_id != b_id, f"AMaterial and BMaterial got the same dispatch ID: {a_id}")
+
+    trimmed_result = abi.call(
+        "slang_wasm_compile_entry_point", module, entry_ptr, entry_len, 0, trimmed_conformances
+    )
+    trimmed_succeeded, trimmed_code, trimmed_diag = read_result(abi, trimmed_result)
+    check(trimmed_succeeded, f"trimmed compile failed:\n{trimmed_diag}")
+    check(len(trimmed_code) > 0, "trimmed compile produced empty code")
+    check(
+        trimmed_code != full_code,
+        "trimming type conformances produced identical code to the full-conformance compile",
+    )
+    print(
+        f"type conformance: full (3) {len(full_code)} bytes, "
+        f"trimmed (2) {len(trimmed_code)} bytes, differ: OK"
+    )
+
+    abi.call("slang_wasm_result_destroy", full_result)
+    abi.call("slang_wasm_result_destroy", trimmed_result)
+    abi.call("slang_wasm_type_conformances_destroy", valid_conformances)
+    abi.call("slang_wasm_type_conformances_destroy", full_conformances)
+    abi.call("slang_wasm_type_conformances_destroy", trimmed_conformances)
+    abi.call("slang_wasm_module_destroy", module)
+    abi.call("slang_wasm_session_destroy", session)
+    abi.free(entry_ptr)
+
+
 def main() -> int:
     if len(sys.argv) != 4:
         print(f"Usage: {sys.argv[0]} <slang-wasm-wasi.wasm> <slang-file> <entry-point>", file=sys.stderr)
@@ -420,6 +526,9 @@ def main() -> int:
     generic_source_path = Path(__file__).resolve().parent / "generic_add.slang"
     with open(generic_source_path, "r", encoding="utf-8") as f:
         generic_source = f.read()
+    type_conformance_source_path = Path(__file__).resolve().parent / "type_conformance.slang"
+    with open(type_conformance_source_path, "r", encoding="utf-8") as f:
+        type_conformance_source = f.read()
 
     print(f"Loading WASI module: {wasm_path}")
     # The module is built with -fwasm-exceptions (see slang-wasm-wasi's
@@ -471,6 +580,10 @@ def main() -> int:
             lambda: test_multi_target_session(abi, metadata, source, entry_name),
         ),
         ("specialization", lambda: test_specialization(abi, metadata, generic_source)),
+        (
+            "type conformance",
+            lambda: test_type_conformance(abi, metadata, type_conformance_source),
+        ),
     ]
 
     for name, test in tests:

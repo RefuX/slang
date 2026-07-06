@@ -2,7 +2,7 @@
 
 A WebAssembly build of the Slang shader compiler, callable from any
 WASI-compatible runtime.
-  
+
 The module is a plain WASI reactor exporting a flat C ABI.
 This is currently a WASIp1 project.
 
@@ -27,8 +27,8 @@ instantiate the WASI module, call the flat C ABI, and manage memory across the h
 ### Running the example's tests
 
 The example's tests cover
-compilation, the builder/CompileRequest API, modules, specialization, typed and declaration
-reflection, structured diagnostics, and disassembly.
+compilation, the builder/CompileRequest API, modules, specialization, type conformance, typed and
+declaration reflection, structured diagnostics, and disassembly.
 
 ```bash
 # From a clone of https://github.com/RefuX/slang-wasm-endive
@@ -59,19 +59,19 @@ to (re)create the C++ metadata blob.
 
 [generate-slang-bindings.py](tools/generate-slang-bindings.py) reads `include/slang.h` and emits the following artefact:
 
-| Output                         |  Purpose                                                                                                                                                                                                                                                                                          |
-| ------------------------------ |  ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `slang-wasm-wasi-enum-metadata.cpp` |  C++ static JSON blob baked into the WASM module, exported via `slang_wasm_enum_metadata_ptr/len`. Dynamic-language runtimes (Go, Python, Rust) call these two exports at startup to resolve enum integer values without hardcoding them. |
+| Output                              | Purpose                                                                                                                                                                                                                                  |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `slang-wasm-wasi-enum-metadata.cpp` | C++ static JSON blob baked into the WASM module, exported via `slang_wasm_enum_metadata_ptr/len`. Dynamic-language runtimes (Go, Python, Rust) call these two exports at startup to resolve enum integer values without hardcoding them. |
 
 Options:
 
-| Option           | Default                         | Purpose                                                                 |
-| ---------------- | ------------------------------- | ----------------------------------------------------------------------- |
-| `--java-out DIR` | unset                           | Output directory for generated Java enum source files. Omit to skip Java generation. |
-| `--java-package PKG` | `org.shaderslang.wasm.enums` | Java package declared in each generated enum source file.               |
-| `--slang-h PATH` | `include/slang.h`               | Input Slang public header to parse for enum values.                     |
-| `--cpp-out PATH` | `source/slang-wasm-wasi/slang-wasm-wasi-enum-metadata.cpp` | Output path for the C++ enum metadata translation unit.                 |
-   
+| Option               | Default                                                    | Purpose                                                                              |
+| -------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `--java-out DIR`     | unset                                                      | Output directory for generated Java enum source files. Omit to skip Java generation. |
+| `--java-package PKG` | `org.shaderslang.wasm.enums`                               | Java package declared in each generated enum source file.                            |
+| `--slang-h PATH`     | `include/slang.h`                                          | Input Slang public header to parse for enum values.                                  |
+| `--cpp-out PATH`     | `source/slang-wasm-wasi/slang-wasm-wasi-enum-metadata.cpp` | Output path for the C++ enum metadata translation unit.                              |
+
 ### Consuming the enum metadata at runtime
 
 Rather than hardcoding Slang's enum integer values (which can shift as `slang.h` evolves), a
@@ -134,6 +134,7 @@ At a high level, the ABI covers:
 - Module loading, entry-point enumeration, serialization, and destruction
 - Compilation entry points
 - Specialization arguments
+- Type conformance (explicit interface dynamic-dispatch control)
 - Declaration reflection and disassembly
 - Result accessors and result destruction
 - Build/version information

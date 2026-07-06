@@ -101,6 +101,10 @@ target_link_options(
         # module serialisation exports.
         -Wl,--export=slang_wasm_module_serialize
         -Wl,--export=slang_wasm_session_load_module_ir
+        # type conformance exports.
+        -Wl,--export=slang_wasm_type_conformances_create
+        -Wl,--export=slang_wasm_type_conformances_add
+        -Wl,--export=slang_wasm_type_conformances_destroy
         # specialization exports.
         -Wl,--export=slang_wasm_spec_args_create
         -Wl,--export=slang_wasm_spec_args_add_type

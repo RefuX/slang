@@ -130,6 +130,15 @@ struct WasmModule
     std::vector<std::string> entryPointNames;
 };
 
+// A list of type conformances, resolved eagerly against the owning module's
+// layout at add-time
+struct WasmTypeConformances
+{
+    ComPtr<slang::ISession> session;
+    slang::IModule* module = nullptr; // owned by `session`'s module cache, not by us
+    std::vector<ComPtr<slang::ITypeConformance>> conformances;
+};
+
 // ── Global state ──────────────────────────────────────────────────────────────
 
 static ComPtr<slang::IGlobalSession> g_globalSession;
@@ -142,6 +151,7 @@ static std::unordered_map<uint32_t, WasmPathList*> g_pathLists;
 static std::unordered_map<uint32_t, WasmOptions*> g_optionLists;
 static std::unordered_map<uint32_t, WasmModule*> g_modules;
 static std::unordered_map<uint32_t, WasmSpecArgs*> g_specArgsLists;
+static std::unordered_map<uint32_t, WasmTypeConformances*> g_typeConformancesLists;
 static uint32_t g_nextSessionHandle = 1;
 static uint32_t g_nextResultHandle = 1;
 static uint32_t g_nextTargetListHandle = 1;
@@ -150,6 +160,7 @@ static uint32_t g_nextPathListHandle = 1;
 static uint32_t g_nextOptionsHandle = 1;
 static uint32_t g_nextModuleHandle = 1;
 static uint32_t g_nextSpecArgsHandle = 1;
+static uint32_t g_nextTypeConformancesHandle = 1;
 
 // Insert `value` into `table` under a freshly allocated handle from `*nextHandle`.
 template<typename T>
@@ -170,7 +181,7 @@ static T* takeHandle(std::unordered_map<uint32_t, T*>& table, uint32_t handle)
 {
     if (handle == 0)
         return nullptr;
-    auto it = table.find(handle);
+    const auto it = table.find(handle);
     if (it == table.end())
         return nullptr;
     T* value = it->second;
@@ -404,6 +415,21 @@ static void linkCompileAndReflect(
     linkAndGetCode(composite, targetIndex, useTargetCode, result);
 }
 
+// Append `typeConformancesHandle`'s already-resolved ITypeConformance component
+// types (if any) onto `components`, so they participate in the same
+// createCompositeComponentType call as the module/entry-point(s) being compiled.
+// A 0/unknown handle appends nothing.
+static void appendTypeConformances(
+    SlangWasmTypeConformances typeConformancesHandle,
+    std::vector<slang::IComponentType*>& components)
+{
+    const auto it = g_typeConformancesLists.find(typeConformancesHandle);
+    if (it == g_typeConformancesLists.end())
+        return;
+    for (auto& conformance : it->second->conformances)
+        components.push_back(conformance.get());
+}
+
 // ── Memory helpers ────────────────────────────────────────────────────────────
 
 extern "C" void* slang_wasm_alloc(uint32_t size)
@@ -458,7 +484,7 @@ extern "C" void slang_wasm_target_list_add(
     uint32_t profileLen,
     uint32_t flags)
 {
-    auto it = g_targetLists.find(listHandle);
+    const auto it = g_targetLists.find(listHandle);
     SLANG_WASM_ASSERT(it != g_targetLists.end());
 
     // ensureGlobalSession()/spFindProfile() can throw; catch it here (no result
@@ -499,7 +525,7 @@ extern "C" void slang_wasm_macro_list_add(
     const char* value,
     uint32_t valueLen)
 {
-    auto it = g_macroLists.find(listHandle);
+    const auto it = g_macroLists.find(listHandle);
     SLANG_WASM_ASSERT(it != g_macroLists.end());
     try
     {
@@ -525,7 +551,7 @@ extern "C" void slang_wasm_path_list_add(
     const char* path,
     uint32_t pathLen)
 {
-    auto it = g_pathLists.find(listHandle);
+    const auto it = g_pathLists.find(listHandle);
     SLANG_WASM_ASSERT(it != g_pathLists.end());
     try
     {
@@ -552,7 +578,7 @@ extern "C" void slang_wasm_options_add_string(
     const char* val,
     uint32_t valLen)
 {
-    auto it = g_optionLists.find(optsHandle);
+    const auto it = g_optionLists.find(optsHandle);
     SLANG_WASM_ASSERT(it != g_optionLists.end());
     try
     {
@@ -569,7 +595,7 @@ extern "C" void slang_wasm_options_add_string(
 
 extern "C" void slang_wasm_options_add_int(SlangWasmOptions optsHandle, uint32_t name, int32_t val)
 {
-    auto it = g_optionLists.find(optsHandle);
+    const auto it = g_optionLists.find(optsHandle);
     SLANG_WASM_ASSERT(it != g_optionLists.end());
     try
     {
@@ -736,7 +762,7 @@ extern "C" SlangWasmModule slang_wasm_session_load_module(
 {
     try
     {
-        auto sessionIt = g_sessions.find(sessionHandle);
+        const auto sessionIt = g_sessions.find(sessionHandle);
         SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
         const ComPtr<slang::ISession> session = sessionIt->second->session;
 
@@ -773,7 +799,7 @@ extern "C" void slang_wasm_module_destroy(SlangWasmModule handle)
 // ambiguous-but-harmless sentinel for "nothing to enumerate" either way.
 extern "C" uint32_t slang_wasm_module_entry_point_count(SlangWasmModule handle)
 {
-    auto it = g_modules.find(handle);
+    const auto it = g_modules.find(handle);
     if (it == g_modules.end())
         return 0;
     return static_cast<uint32_t>(it->second->entryPointNames.size());
@@ -783,7 +809,7 @@ extern "C" uint32_t slang_wasm_module_entry_point_count(SlangWasmModule handle)
 // reason as slang_wasm_module_entry_point_count above.
 extern "C" uint32_t slang_wasm_module_entry_point_name_ptr(SlangWasmModule handle, uint32_t index)
 {
-    auto it = g_modules.find(handle);
+    const auto it = g_modules.find(handle);
     if (it == g_modules.end() || index >= it->second->entryPointNames.size())
         return 0;
     return static_cast<uint32_t>(
@@ -794,7 +820,7 @@ extern "C" uint32_t slang_wasm_module_entry_point_name_ptr(SlangWasmModule handl
 // reason as slang_wasm_module_entry_point_count above.
 extern "C" uint32_t slang_wasm_module_entry_point_name_len(SlangWasmModule handle, uint32_t index)
 {
-    auto it = g_modules.find(handle);
+    const auto it = g_modules.find(handle);
     if (it == g_modules.end() || index >= it->second->entryPointNames.size())
         return 0;
     return static_cast<uint32_t>(it->second->entryPointNames[index].size());
@@ -807,7 +833,7 @@ extern "C" SlangWasmResult slang_wasm_module_serialize(SlangWasmModule moduleHan
 
     try
     {
-        auto moduleIt = g_modules.find(moduleHandle);
+        const auto moduleIt = g_modules.find(moduleHandle);
         SLANG_RELEASE_ASSERT(moduleIt != g_modules.end());
         slang::IModule* module = moduleIt->second->module;
 
@@ -843,7 +869,7 @@ extern "C" SlangWasmModule slang_wasm_session_load_module_ir(
 {
     try
     {
-        auto sessionIt = g_sessions.find(sessionHandle);
+        const auto sessionIt = g_sessions.find(sessionHandle);
         SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
         const ComPtr<slang::ISession> session = sessionIt->second->session;
 
@@ -877,6 +903,79 @@ extern "C" SlangWasmModule slang_wasm_session_load_module_ir(
     }
 }
 
+// ── Type conformance ──────────────────────────────────────────────────────────
+
+extern "C" SlangWasmTypeConformances slang_wasm_type_conformances_create(
+    SlangWasmModule moduleHandle)
+{
+    const auto moduleIt = g_modules.find(moduleHandle);
+    if (moduleIt == g_modules.end())
+        return 0;
+
+    auto* conformances = new WasmTypeConformances();
+    conformances->session = moduleIt->second->session;
+    conformances->module = moduleIt->second->module;
+    return insertHandle(g_typeConformancesLists, &g_nextTypeConformancesHandle, conformances);
+}
+
+extern "C" int32_t slang_wasm_type_conformances_add(
+    SlangWasmTypeConformances conformancesHandle,
+    const char* concreteTypeName,
+    uint32_t concreteTypeNameLen,
+    const char* interfaceTypeName,
+    uint32_t interfaceTypeNameLen,
+    int32_t conformanceIdOverride)
+{
+    const auto it = g_typeConformancesLists.find(conformancesHandle);
+    SLANG_WASM_ASSERT(it != g_typeConformancesLists.end());
+    try
+    {
+        WasmTypeConformances* wasmConformances = it->second;
+
+        ComPtr<slang::IBlob> diagBlob;
+        slang::ProgramLayout* layout = wasmConformances->module->getLayout(0, diagBlob.writeRef());
+        if (!layout)
+            return -1;
+
+        const std::string concreteTypeNameStr = toStr(concreteTypeName, concreteTypeNameLen);
+        const std::string interfaceTypeNameStr = toStr(interfaceTypeName, interfaceTypeNameLen);
+        slang::TypeReflection* concreteType = layout->findTypeByName(concreteTypeNameStr.c_str());
+        slang::TypeReflection* interfaceType = layout->findTypeByName(interfaceTypeNameStr.c_str());
+        if (!concreteType || !interfaceType)
+            return -1;
+
+        ComPtr<slang::ITypeConformance> conformance;
+        diagBlob = nullptr;
+        const SlangResult r = wasmConformances->session->createTypeConformanceComponentType(
+            concreteType,
+            interfaceType,
+            conformance.writeRef(),
+            static_cast<SlangInt>(conformanceIdOverride),
+            diagBlob.writeRef());
+        if (SLANG_FAILED(r) || !conformance)
+            return -1;
+
+        uint32_t assignedId = 0;
+        if (SLANG_FAILED(wasmConformances->session->getTypeConformanceWitnessSequentialID(
+                concreteType,
+                interfaceType,
+                &assignedId)))
+            return -1;
+
+        wasmConformances->conformances.push_back(std::move(conformance));
+        return static_cast<int32_t>(assignedId);
+    }
+    catch (...)
+    {
+        return -1;
+    }
+}
+
+extern "C" void slang_wasm_type_conformances_destroy(SlangWasmTypeConformances handle)
+{
+    delete takeHandle(g_typeConformancesLists, handle);
+}
+
 // ── Specialization ────────────────────────────────────────────────────────────
 
 extern "C" SlangWasmSpecArgs slang_wasm_spec_args_create(void)
@@ -889,7 +988,7 @@ extern "C" void slang_wasm_spec_args_add_type(
     const char* typeName,
     uint32_t typeNameLen)
 {
-    auto it = g_specArgsLists.find(argsHandle);
+    const auto it = g_specArgsLists.find(argsHandle);
     SLANG_WASM_ASSERT(it != g_specArgsLists.end());
     try
     {
@@ -905,7 +1004,7 @@ extern "C" void slang_wasm_spec_args_add_expr(
     const char* expr,
     uint32_t exprLen)
 {
-    auto it = g_specArgsLists.find(argsHandle);
+    const auto it = g_specArgsLists.find(argsHandle);
     SLANG_WASM_ASSERT(it != g_specArgsLists.end());
     try
     {
@@ -926,7 +1025,8 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
     const char* entryName,
     uint32_t entryNameLen,
     SlangWasmSpecArgs specArgsHandle,
-    uint32_t targetIndex)
+    uint32_t targetIndex,
+    SlangWasmTypeConformances typeConformances)
 {
     auto* result = new WasmResult();
     const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
@@ -936,7 +1036,7 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
 
     try
     {
-        auto moduleIt = g_modules.find(moduleHandle);
+        const auto moduleIt = g_modules.find(moduleHandle);
         SLANG_RELEASE_ASSERT(moduleIt != g_modules.end());
         slang::ISession* session = moduleIt->second->session.get();
         slang::IModule* module = moduleIt->second->module;
@@ -947,12 +1047,13 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
         if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
-        slang::IComponentType* components[] = {module, entryPoint.get()};
+        std::vector<slang::IComponentType*> components = {module, entryPoint.get()};
+        appendTypeConformances(typeConformances, components);
         ComPtr<slang::IComponentType> composite;
         ComPtr<slang::IBlob> diagBlob;
         r = session->createCompositeComponentType(
-            components,
-            2,
+            components.data(),
+            static_cast<SlangInt>(components.size()),
             composite.writeRef(),
             diagBlob.writeRef());
         appendBlob(result->diagnostics, diagBlob);
@@ -1034,7 +1135,7 @@ extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModul
 
     try
     {
-        auto moduleIt = g_modules.find(moduleHandle);
+        const auto moduleIt = g_modules.find(moduleHandle);
         SLANG_RELEASE_ASSERT(moduleIt != g_modules.end());
         slang::IModule* module = moduleIt->second->module;
 
@@ -1068,7 +1169,7 @@ extern "C" SlangWasmResult slang_wasm_module_disassemble(SlangWasmModule moduleH
 
     try
     {
-        auto moduleIt = g_modules.find(moduleHandle);
+        const auto moduleIt = g_modules.find(moduleHandle);
         SLANG_RELEASE_ASSERT(moduleIt != g_modules.end());
         slang::IModule* module = moduleIt->second->module;
 
@@ -1109,7 +1210,7 @@ extern "C" SlangWasmResult slang_wasm_compile(
 
     try
     {
-        auto sessionIt = g_sessions.find(sessionHandle);
+        const auto sessionIt = g_sessions.find(sessionHandle);
         SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
         slang::ISession* session = sessionIt->second->session.get();
 
@@ -1153,14 +1254,15 @@ extern "C" SlangWasmResult slang_wasm_compile_entry_point(
     SlangWasmModule moduleHandle,
     const char* entryName,
     uint32_t entryNameLen,
-    uint32_t targetIndex)
+    uint32_t targetIndex,
+    SlangWasmTypeConformances typeConformances)
 {
     auto* result = new WasmResult();
     const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
 
     try
     {
-        auto moduleIt = g_modules.find(moduleHandle);
+        const auto moduleIt = g_modules.find(moduleHandle);
         SLANG_RELEASE_ASSERT(moduleIt != g_modules.end());
         slang::ISession* session = moduleIt->second->session.get();
         slang::IModule* module = moduleIt->second->module;
@@ -1173,8 +1275,15 @@ extern "C" SlangWasmResult slang_wasm_compile_entry_point(
         if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
-        slang::IComponentType* components[] = {module, entryPoint.get()};
-        linkCompileAndReflect(session, components, 2, targetIndex, false, result);
+        std::vector<slang::IComponentType*> components = {module, entryPoint.get()};
+        appendTypeConformances(typeConformances, components);
+        linkCompileAndReflect(
+            session,
+            components.data(),
+            static_cast<SlangInt>(components.size()),
+            targetIndex,
+            false,
+            result);
         return resultHandle;
     }
     catch (...)
@@ -1187,14 +1296,15 @@ extern "C" SlangWasmResult slang_wasm_compile_entry_point(
 
 extern "C" SlangWasmResult slang_wasm_compile_module(
     SlangWasmModule moduleHandle,
-    uint32_t targetIndex)
+    uint32_t targetIndex,
+    SlangWasmTypeConformances typeConformances)
 {
     auto* result = new WasmResult();
     const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
 
     try
     {
-        auto moduleIt = g_modules.find(moduleHandle);
+        const auto moduleIt = g_modules.find(moduleHandle);
         SLANG_RELEASE_ASSERT(moduleIt != g_modules.end());
         WasmModule* wasmModule = moduleIt->second;
         slang::ISession* session = wasmModule->session.get();
@@ -1203,6 +1313,7 @@ extern "C" SlangWasmResult slang_wasm_compile_module(
         components.push_back(wasmModule->module);
         for (auto& ep : wasmModule->entryPoints)
             components.push_back(ep.get());
+        appendTypeConformances(typeConformances, components);
 
         linkCompileAndReflect(
             session,
@@ -1230,7 +1341,7 @@ extern "C" SlangWasmResult slang_wasm_compile_module(
 // module for every other in-flight caller.
 extern "C" int32_t slang_wasm_result_succeeded(SlangWasmResult handle)
 {
-    auto it = g_results.find(handle);
+    const auto it = g_results.find(handle);
     if (it == g_results.end())
         return 0;
     return it->second->succeeded ? 1 : 0;
@@ -1238,7 +1349,7 @@ extern "C" int32_t slang_wasm_result_succeeded(SlangWasmResult handle)
 
 extern "C" uint32_t slang_wasm_result_code_ptr(SlangWasmResult handle)
 {
-    auto it = g_results.find(handle);
+    const auto it = g_results.find(handle);
     if (it == g_results.end())
         return 0;
     return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->code.data()));
@@ -1246,7 +1357,7 @@ extern "C" uint32_t slang_wasm_result_code_ptr(SlangWasmResult handle)
 
 extern "C" uint32_t slang_wasm_result_code_len(SlangWasmResult handle)
 {
-    auto it = g_results.find(handle);
+    const auto it = g_results.find(handle);
     if (it == g_results.end())
         return 0;
     return static_cast<uint32_t>(it->second->code.size());
@@ -1254,7 +1365,7 @@ extern "C" uint32_t slang_wasm_result_code_len(SlangWasmResult handle)
 
 extern "C" uint32_t slang_wasm_result_reflection_json_ptr(SlangWasmResult handle)
 {
-    auto it = g_results.find(handle);
+    const auto it = g_results.find(handle);
     if (it == g_results.end())
         return 0;
     return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->reflectionJson.data()));
@@ -1262,7 +1373,7 @@ extern "C" uint32_t slang_wasm_result_reflection_json_ptr(SlangWasmResult handle
 
 extern "C" uint32_t slang_wasm_result_reflection_json_len(SlangWasmResult handle)
 {
-    auto it = g_results.find(handle);
+    const auto it = g_results.find(handle);
     if (it == g_results.end())
         return 0;
     return static_cast<uint32_t>(it->second->reflectionJson.size());
@@ -1270,7 +1381,7 @@ extern "C" uint32_t slang_wasm_result_reflection_json_len(SlangWasmResult handle
 
 extern "C" uint32_t slang_wasm_result_diagnostics_ptr(SlangWasmResult handle)
 {
-    auto it = g_results.find(handle);
+    const auto it = g_results.find(handle);
     if (it == g_results.end())
         return 0;
     return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->diagnostics.data()));
@@ -1278,7 +1389,7 @@ extern "C" uint32_t slang_wasm_result_diagnostics_ptr(SlangWasmResult handle)
 
 extern "C" uint32_t slang_wasm_result_diagnostics_len(SlangWasmResult handle)
 {
-    auto it = g_results.find(handle);
+    const auto it = g_results.find(handle);
     if (it == g_results.end())
         return 0;
     return static_cast<uint32_t>(it->second->diagnostics.size());
