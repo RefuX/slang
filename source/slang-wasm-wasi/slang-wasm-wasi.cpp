@@ -510,7 +510,14 @@ extern "C" int32_t slang_wasm_stage_from_string(const char* name, uint32_t nameL
 
 extern "C" SlangWasmTargetList slang_wasm_target_list_create(void)
 {
-    return insertHandle(g_targetLists, &g_nextTargetListHandle, new WasmTargetList());
+    try
+    {
+        return insertHandle(g_targetLists, &g_nextTargetListHandle, new WasmTargetList());
+    }
+    catch (...)
+    {
+        return 0;
+    }
 }
 
 extern "C" void slang_wasm_target_list_add(
@@ -551,7 +558,14 @@ extern "C" void slang_wasm_target_list_destroy(SlangWasmTargetList handle)
 
 extern "C" SlangWasmMacroList slang_wasm_macro_list_create(void)
 {
-    return insertHandle(g_macroLists, &g_nextMacroListHandle, new WasmMacroList());
+    try
+    {
+        return insertHandle(g_macroLists, &g_nextMacroListHandle, new WasmMacroList());
+    }
+    catch (...)
+    {
+        return 0;
+    }
 }
 
 extern "C" void slang_wasm_macro_list_add(
@@ -579,7 +593,14 @@ extern "C" void slang_wasm_macro_list_destroy(SlangWasmMacroList handle)
 
 extern "C" SlangWasmPathList slang_wasm_path_list_create(void)
 {
-    return insertHandle(g_pathLists, &g_nextPathListHandle, new WasmPathList());
+    try
+    {
+        return insertHandle(g_pathLists, &g_nextPathListHandle, new WasmPathList());
+    }
+    catch (...)
+    {
+        return 0;
+    }
 }
 
 extern "C" void slang_wasm_path_list_add(
@@ -605,7 +626,14 @@ extern "C" void slang_wasm_path_list_destroy(SlangWasmPathList handle)
 
 extern "C" SlangWasmOptions slang_wasm_options_create(void)
 {
-    return insertHandle(g_optionLists, &g_nextOptionsHandle, new WasmOptions());
+    try
+    {
+        return insertHandle(g_optionLists, &g_nextOptionsHandle, new WasmOptions());
+    }
+    catch (...)
+    {
+        return 0;
+    }
 }
 
 extern "C" void slang_wasm_options_add_string(
@@ -949,10 +977,17 @@ extern "C" SlangWasmTypeConformances slang_wasm_type_conformances_create(
     if (moduleIt == g_modules.end())
         return 0;
 
-    auto* conformances = new WasmTypeConformances();
-    conformances->session = moduleIt->second->session;
-    conformances->module = moduleIt->second->module;
-    return insertHandle(g_typeConformancesLists, &g_nextTypeConformancesHandle, conformances);
+    try
+    {
+        auto* conformances = new WasmTypeConformances();
+        conformances->session = moduleIt->second->session;
+        conformances->module = moduleIt->second->module;
+        return insertHandle(g_typeConformancesLists, &g_nextTypeConformancesHandle, conformances);
+    }
+    catch (...)
+    {
+        return 0;
+    }
 }
 
 extern "C" int32_t slang_wasm_type_conformances_add(
@@ -1044,7 +1079,14 @@ extern "C" void slang_wasm_type_conformances_destroy(SlangWasmTypeConformances h
 
 extern "C" SlangWasmSpecArgs slang_wasm_spec_args_create(void)
 {
-    return insertHandle(g_specArgsLists, &g_nextSpecArgsHandle, new WasmSpecArgs());
+    try
+    {
+        return insertHandle(g_specArgsLists, &g_nextSpecArgsHandle, new WasmSpecArgs());
+    }
+    catch (...)
+    {
+        return 0;
+    }
 }
 
 extern "C" void slang_wasm_spec_args_add_type(

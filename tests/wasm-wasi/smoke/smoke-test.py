@@ -419,6 +419,14 @@ def test_multi_target_session(abi: Abi, metadata: dict, source: str, entry_name:
         metadata["CompilerOptionName"]["Optimization"],
         metadata["OptimizationLevel"]["HIGH"],
     )
+    include_ptr, include_len = abi.alloc(b".")
+    abi.call(
+        "slang_wasm_options_add_string",
+        options,
+        metadata["CompilerOptionName"]["Include"],
+        include_ptr,
+        include_len,
+    )
 
     session = abi.call("slang_wasm_session_create2", targets, macros, paths, options)
     check(session != 0, "slang_wasm_session_create2 failed")
@@ -453,6 +461,7 @@ def test_multi_target_session(abi: Abi, metadata: dict, source: str, entry_name:
         macro_name_ptr,
         macro_val_ptr,
         path_ptr,
+        include_ptr,
     ):
         abi.free(ptr)
 
@@ -488,9 +497,39 @@ def test_specialization(abi: Abi, metadata: dict, generic_source: str) -> None:
     check(code_3 != code_4, "specializing with different values produced identical code")
     print(f"specialization: x=3 -> {len(code_3)} bytes, x=4 -> {len(code_4)} bytes, differ: OK")
 
+    # slang_wasm_spec_args_add_type: name-based type specialization, resolved
+    # via findTypeByName against the composite's own layout.
+    typed_entry_ptr, typed_entry_len = abi.alloc(b"computeMainTyped")
+
+    def compile_specialized_type(type_name: str) -> bytes:
+        args = abi.call("slang_wasm_spec_args_create")
+        type_ptr, type_len = abi.alloc(type_name.encode("utf-8"))
+        abi.call("slang_wasm_spec_args_add_type", args, type_ptr, type_len)
+        result = abi.call(
+            "slang_wasm_compile_specialized_entry_point",
+            module,
+            typed_entry_ptr,
+            typed_entry_len,
+            args,
+            0,
+            0,
+        )
+        succeeded, code, diagnostics = read_result(abi, result)
+        check(succeeded, f"specialized compile (T={type_name}) failed:\n{diagnostics}")
+        check(len(code) > 0, f"specialized compile (T={type_name}) produced empty code")
+        abi.call("slang_wasm_result_destroy", result)
+        abi.free(type_ptr)
+        return code
+
+    code_a = compile_specialized_type("ValueA")
+    code_b = compile_specialized_type("ValueB")
+    check(code_a != code_b, "specializing with different types produced identical code")
+    print(f"specialization: T=ValueA -> {len(code_a)} bytes, T=ValueB -> {len(code_b)} bytes, differ: OK")
+
     abi.call("slang_wasm_module_destroy", module)
     abi.call("slang_wasm_session_destroy", session)
     abi.free(entry_ptr)
+    abi.free(typed_entry_ptr)
 
 
 def test_type_conformance(abi: Abi, metadata: dict, type_conformance_source: str) -> None:

@@ -13,3 +13,28 @@ void computeMain<int x>(uint3 tid : SV_DispatchThreadID)
 {
     outputBuffer[tid.x] = x * 100 + 7;
 }
+
+// A second entry point, generic over a type rather than a value, used to
+// exercise slang_wasm_spec_args_add_type (the name-based specialization
+// path via findTypeByName, distinct from the constant-expression path
+// computeMain above exercises).
+interface IValue
+{
+    int getValue();
+}
+struct ValueA : IValue
+{
+    int getValue() { return 1; }
+}
+struct ValueB : IValue
+{
+    int getValue() { return 2; }
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void computeMainTyped<T : IValue>(uint3 tid : SV_DispatchThreadID)
+{
+    T value;
+    outputBuffer[tid.x] = value.getValue();
+}

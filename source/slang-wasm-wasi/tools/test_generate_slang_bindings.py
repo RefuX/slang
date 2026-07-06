@@ -18,7 +18,9 @@ or directly:
 """
 
 import importlib.util
+import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -276,7 +278,7 @@ class GenerateJavaEnumTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class MainJavaOutputTests(unittest.TestCase):
+class MainOutputTests(unittest.TestCase):
     def test_java_out_writes_one_file_per_enum_with_expected_package(self):
         with tempfile.TemporaryDirectory() as tmp:
             cpp_out = os.path.join(tmp, "enum-metadata.cpp")
@@ -298,6 +300,18 @@ class MainJavaOutputTests(unittest.TestCase):
             self.assertIn("package test.pkg;", source)
             self.assertIn("public enum Target {", source)
             self.assertIn("SPIRV(6)", source)
+
+            # --cpp-out is the artifact that actually ships in the wasm module;
+            # decode its adjacent C string literals (each valid JSON-string
+            # syntax, since json.dumps produced them) to recover the blob.
+            self.assertTrue(os.path.exists(cpp_out), "enum-metadata.cpp was not written")
+            with open(cpp_out, encoding="utf-8") as f:
+                cpp_source = f.read()
+            array_body = re.search(r"kEnumMetadataJson\[\] =(.*?);", cpp_source, re.DOTALL)
+            self.assertIsNotNone(array_body, "kEnumMetadataJson definition not found")
+            literals = re.findall(r'"(?:[^"\\]|\\.)*"', array_body.group(1))
+            metadata = json.loads("".join(json.loads(lit) for lit in literals))
+            self.assertEqual(metadata["Target"]["SPIRV"], 6)
 
 
 # ---------------------------------------------------------------------------
