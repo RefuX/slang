@@ -189,6 +189,24 @@ static T* takeHandle(std::unordered_map<uint32_t, T*>& table, uint32_t handle)
     return value;
 }
 
+// Allocate a WasmResult and register it under a fresh handle, catching any
+// exception this can throw (e.g. std::bad_alloc) so the exported functions
+// that call this before their own try block never let one escape. Returns
+// {nullptr, 0} on failure.
+static std::pair<WasmResult*, uint32_t> makeWasmResult()
+{
+    try
+    {
+        auto* result = new WasmResult();
+        const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+        return {result, resultHandle};
+    }
+    catch (...)
+    {
+        return {nullptr, 0};
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // Convert a (ptr, len) argument pair from the host into a std::string,
@@ -295,23 +313,22 @@ static void emitDeclReflectionJson(slang::DeclReflection* decl, Slang::PrettyWri
     writer << "}";
 }
 
-// Copy `blob`'s contents into a freshly malloc'd buffer and write its
-// (ptr, len) into the caller-supplied out-params, or (0, 0) if `blob` is empty.
+// Copy `size` bytes from `data` into a freshly malloc'd buffer and write its
+// (ptr, len) into the caller-supplied out-params, or (0, 0) if `size` is 0.
 // The buffer is owned by the caller of the function that took these out-params;
-// free it with slang_wasm_free. Used by APIs that can fail before producing a
-// handle to hang diagnostics off of (e.g. slang_wasm_session_load_module), so
-// diagnostics are not lost on a failed load.
-static void writeDiagOut(slang::IBlob* blob, uint32_t* diagPtrOut, uint32_t* diagLenOut)
+// free it with slang_wasm_free. Shared by writeDiagOut (a single slang::IBlob)
+// and writeDiagOutString (diagnostics accumulated from multiple sources into
+// one std::string).
+static void writeDiagOutBytes(const void* data, size_t size, uint32_t* diagPtrOut, uint32_t* diagLenOut)
 {
     if (!diagPtrOut || !diagLenOut)
         return;
-    if (!blob || blob->getBufferSize() == 0)
+    if (!data || size == 0)
     {
         *diagPtrOut = 0;
         *diagLenOut = 0;
         return;
     }
-    const size_t size = blob->getBufferSize();
     void* buf = malloc(size);
     if (!buf)
     {
@@ -322,9 +339,28 @@ static void writeDiagOut(slang::IBlob* blob, uint32_t* diagPtrOut, uint32_t* dia
         *diagLenOut = 0;
         return;
     }
-    memcpy(buf, blob->getBufferPointer(), size);
+    memcpy(buf, data, size);
     *diagPtrOut = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(buf));
     *diagLenOut = static_cast<uint32_t>(size);
+}
+
+// Used by APIs that can fail before producing a handle to hang diagnostics off
+// of (e.g. slang_wasm_session_load_module), so diagnostics are not lost on a
+// failed load.
+static void writeDiagOut(slang::IBlob* blob, uint32_t* diagPtrOut, uint32_t* diagLenOut)
+{
+    writeDiagOutBytes(
+        blob ? blob->getBufferPointer() : nullptr,
+        blob ? blob->getBufferSize() : 0,
+        diagPtrOut,
+        diagLenOut);
+}
+
+// As writeDiagOut, but for diagnostics already accumulated (e.g. via
+// appendBlob) from more than one Slang call into a single std::string.
+static void writeDiagOutString(const std::string& diagnostics, uint32_t* diagPtrOut, uint32_t* diagLenOut)
+{
+    writeDiagOutBytes(diagnostics.data(), diagnostics.size(), diagPtrOut, diagLenOut);
 }
 
 // Link `unlinked`, then produce code for the target at `targetIndex` plus
@@ -828,8 +864,9 @@ extern "C" uint32_t slang_wasm_module_entry_point_name_len(SlangWasmModule handl
 
 extern "C" SlangWasmResult slang_wasm_module_serialize(SlangWasmModule moduleHandle)
 {
-    auto* result = new WasmResult();
-    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    auto [result, resultHandle] = makeWasmResult();
+    if (!result)
+        return 0;
 
     try
     {
@@ -924,25 +961,41 @@ extern "C" int32_t slang_wasm_type_conformances_add(
     uint32_t concreteTypeNameLen,
     const char* interfaceTypeName,
     uint32_t interfaceTypeNameLen,
-    int32_t conformanceIdOverride)
+    int32_t conformanceIdOverride,
+    uint32_t* diagPtrOut,
+    uint32_t* diagLenOut)
 {
     const auto it = g_typeConformancesLists.find(conformancesHandle);
     SLANG_WASM_ASSERT(it != g_typeConformancesLists.end());
     try
     {
         WasmTypeConformances* wasmConformances = it->second;
+        std::string diagnostics;
 
         ComPtr<slang::IBlob> diagBlob;
         slang::ProgramLayout* layout = wasmConformances->module->getLayout(0, diagBlob.writeRef());
+        appendBlob(diagnostics, diagBlob);
         if (!layout)
+        {
+            writeDiagOutString(diagnostics, diagPtrOut, diagLenOut);
             return -1;
+        }
 
         const std::string concreteTypeNameStr = toStr(concreteTypeName, concreteTypeNameLen);
         const std::string interfaceTypeNameStr = toStr(interfaceTypeName, interfaceTypeNameLen);
         slang::TypeReflection* concreteType = layout->findTypeByName(concreteTypeNameStr.c_str());
         slang::TypeReflection* interfaceType = layout->findTypeByName(interfaceTypeNameStr.c_str());
         if (!concreteType || !interfaceType)
+        {
+            // findTypeByName gives no diagnostic blob of its own, so synthesize
+            // a message naming whichever lookup(s) failed.
+            if (!concreteType)
+                diagnostics += "error: type '" + concreteTypeNameStr + "' not found in module layout\n";
+            if (!interfaceType)
+                diagnostics += "error: type '" + interfaceTypeNameStr + "' not found in module layout\n";
+            writeDiagOutString(diagnostics, diagPtrOut, diagLenOut);
             return -1;
+        }
 
         ComPtr<slang::ITypeConformance> conformance;
         diagBlob = nullptr;
@@ -952,21 +1005,32 @@ extern "C" int32_t slang_wasm_type_conformances_add(
             conformance.writeRef(),
             static_cast<SlangInt>(conformanceIdOverride),
             diagBlob.writeRef());
+        appendBlob(diagnostics, diagBlob);
         if (SLANG_FAILED(r) || !conformance)
+        {
+            writeDiagOutString(diagnostics, diagPtrOut, diagLenOut);
             return -1;
+        }
 
         uint32_t assignedId = 0;
         if (SLANG_FAILED(wasmConformances->session->getTypeConformanceWitnessSequentialID(
                 concreteType,
                 interfaceType,
                 &assignedId)))
+        {
+            diagnostics += "error: failed to assign a dispatch ID to conformance of '" +
+                           concreteTypeNameStr + "' to '" + interfaceTypeNameStr + "'\n";
+            writeDiagOutString(diagnostics, diagPtrOut, diagLenOut);
             return -1;
+        }
 
         wasmConformances->conformances.push_back(std::move(conformance));
+        writeDiagOutString(diagnostics, diagPtrOut, diagLenOut);
         return static_cast<int32_t>(assignedId);
     }
     catch (...)
     {
+        writeDiagOut(nullptr, diagPtrOut, diagLenOut);
         return -1;
     }
 }
@@ -1028,8 +1092,9 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
     uint32_t targetIndex,
     SlangWasmTypeConformances typeConformances)
 {
-    auto* result = new WasmResult();
-    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    auto [result, resultHandle] = makeWasmResult();
+    if (!result)
+        return 0;
 
     // Consumed exactly once, on every return path.
     std::unique_ptr<WasmSpecArgs> specArgs(takeHandle(g_specArgsLists, specArgsHandle));
@@ -1130,8 +1195,9 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
 
 extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModule moduleHandle)
 {
-    auto* result = new WasmResult();
-    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    auto [result, resultHandle] = makeWasmResult();
+    if (!result)
+        return 0;
 
     try
     {
@@ -1164,8 +1230,9 @@ extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModul
 
 extern "C" SlangWasmResult slang_wasm_module_disassemble(SlangWasmModule moduleHandle)
 {
-    auto* result = new WasmResult();
-    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    auto [result, resultHandle] = makeWasmResult();
+    if (!result)
+        return 0;
 
     try
     {
@@ -1205,8 +1272,9 @@ extern "C" SlangWasmResult slang_wasm_compile(
     uint32_t entryNameLen,
     uint32_t targetIndex)
 {
-    auto* result = new WasmResult();
-    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    auto [result, resultHandle] = makeWasmResult();
+    if (!result)
+        return 0;
 
     try
     {
@@ -1257,8 +1325,9 @@ extern "C" SlangWasmResult slang_wasm_compile_entry_point(
     uint32_t targetIndex,
     SlangWasmTypeConformances typeConformances)
 {
-    auto* result = new WasmResult();
-    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    auto [result, resultHandle] = makeWasmResult();
+    if (!result)
+        return 0;
 
     try
     {
@@ -1299,8 +1368,9 @@ extern "C" SlangWasmResult slang_wasm_compile_module(
     uint32_t targetIndex,
     SlangWasmTypeConformances typeConformances)
 {
-    auto* result = new WasmResult();
-    const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+    auto [result, resultHandle] = makeWasmResult();
+    if (!result)
+        return 0;
 
     try
     {

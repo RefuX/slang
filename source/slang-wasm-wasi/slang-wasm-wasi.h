@@ -226,13 +226,18 @@ extern "C"
     // against `module`'s layout. `conformanceIdOverride` may be -1 to auto-assign
     // the dispatch ID, or a non-negative value to pin it. Returns the assigned
     // dispatch ID, or -1 if either name is unresolvable or the type doesn't conform.
+    // `diagPtrOut`/`diagLenOut` receive a (ptr, len) diagnostic buffer, as with
+    // slang_wasm_session_load_module — (0, 0) if there is nothing to report, and
+    // owned by the caller (free with slang_wasm_free) otherwise.
     int32_t slang_wasm_type_conformances_add(
         SlangWasmTypeConformances conformances,
         const char* concreteTypeName,
         uint32_t concreteTypeNameLen,
         const char* interfaceTypeName,
         uint32_t interfaceTypeNameLen,
-        int32_t conformanceIdOverride);
+        int32_t conformanceIdOverride,
+        uint32_t* diagPtrOut,
+        uint32_t* diagLenOut);
 
     void slang_wasm_type_conformances_destroy(SlangWasmTypeConformances conformances);
 

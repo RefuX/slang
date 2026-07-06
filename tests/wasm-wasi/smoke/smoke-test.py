@@ -506,9 +506,13 @@ def test_type_conformance(abi: Abi, metadata: dict, type_conformance_source: str
     module, load_diag = load_module(abi, session, "type_conformance", type_conformance_source)
     check(module != 0, f"loading the type conformance fixture failed:\n{load_diag}")
 
-    def add_conformance(conformances: int, concrete: str, interface: str) -> int:
+    def add_conformance(conformances: int, concrete: str, interface: str) -> tuple[int, str]:
+        """Returns (assigned dispatch ID, diagnostics text)."""
         concrete_ptr, concrete_len = abi.alloc(concrete.encode("utf-8"))
         interface_ptr, interface_len = abi.alloc(interface.encode("utf-8"))
+        diag_ptr_out = abi.alloc_out_u32()
+        diag_len_out = abi.alloc_out_u32()
+
         assigned_id = abi.call(
             "slang_wasm_type_conformances_add",
             conformances,
@@ -517,21 +521,36 @@ def test_type_conformance(abi: Abi, metadata: dict, type_conformance_source: str
             interface_ptr,
             interface_len,
             -1,  # let Slang auto-assign the dispatch ID
+            diag_ptr_out,
+            diag_len_out,
         )
+
+        diag_ptr = abi.read_u32(diag_ptr_out)
+        diag_len = abi.read_u32(diag_len_out)
+        diagnostics = abi.read(diag_ptr, diag_len).decode("utf-8", errors="replace") if diag_len else ""
+
         abi.free(concrete_ptr)
         abi.free(interface_ptr)
-        return assigned_id
+        abi.free(diag_ptr_out)
+        abi.free(diag_len_out)
+        abi.free(diag_ptr)
+        return assigned_id, diagnostics
 
     # A valid conformance must resolve to a non-negative dispatch ID.
     valid_conformances = abi.call("slang_wasm_type_conformances_create", module)
     check(valid_conformances != 0, "slang_wasm_type_conformances_create failed")
-    assigned_id = add_conformance(valid_conformances, "AMaterial", "IMaterial")
+    assigned_id, _ = add_conformance(valid_conformances, "AMaterial", "IMaterial")
     check(assigned_id >= 0, f"expected a non-negative dispatch ID, got {assigned_id}")
     print(f"type conformance: AMaterial conforms to IMaterial with dispatch ID {assigned_id}")
 
-    # An unresolvable pair must fail (-1) without trapping the instance.
-    bogus_id = add_conformance(valid_conformances, "NotARealType", "IMaterial")
+    # An unresolvable pair must fail (-1) without trapping the instance, and
+    # report which type name(s) could not be resolved.
+    bogus_id, bogus_diag = add_conformance(valid_conformances, "NotARealType", "IMaterial")
     check(bogus_id == -1, f"expected -1 for an unresolvable type, got {bogus_id}")
+    check(
+        "NotARealType" in bogus_diag,
+        f"expected diagnostics to name the unresolvable type, got:\n{bogus_diag}",
+    )
 
     entry_ptr, entry_len = abi.alloc(b"computeMain")
 
@@ -554,7 +573,7 @@ def test_type_conformance(abi: Abi, metadata: dict, type_conformance_source: str
     full_conformances = abi.call("slang_wasm_type_conformances_create", module)
     check(full_conformances != 0, "slang_wasm_type_conformances_create failed")
     for type_name in ("AMaterial", "BMaterial", "CMaterial"):
-        full_id = add_conformance(full_conformances, type_name, "IMaterial")
+        full_id, _ = add_conformance(full_conformances, type_name, "IMaterial")
         check(full_id >= 0, f"expected a non-negative dispatch ID for {type_name}, got {full_id}")
 
     full_result = abi.call(
@@ -567,8 +586,8 @@ def test_type_conformance(abi: Abi, metadata: dict, type_conformance_source: str
     # Trimmed: only AMaterial and BMaterial conform; CMaterial is excluded.
     trimmed_conformances = abi.call("slang_wasm_type_conformances_create", module)
     check(trimmed_conformances != 0, "slang_wasm_type_conformances_create failed")
-    a_id = add_conformance(trimmed_conformances, "AMaterial", "IMaterial")
-    b_id = add_conformance(trimmed_conformances, "BMaterial", "IMaterial")
+    a_id, _ = add_conformance(trimmed_conformances, "AMaterial", "IMaterial")
+    b_id, _ = add_conformance(trimmed_conformances, "BMaterial", "IMaterial")
     check(a_id >= 0 and b_id >= 0, f"expected non-negative dispatch IDs, got {a_id}, {b_id}")
     check(a_id != b_id, f"AMaterial and BMaterial got the same dispatch ID: {a_id}")
 
