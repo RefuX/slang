@@ -16,8 +16,12 @@ endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(_slang_h "${slang_SOURCE_DIR}/include/slang.h")
-set(_generator_script "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate-slang-bindings.py")
-set(_enum_meta_cpp "${CMAKE_CURRENT_SOURCE_DIR}/slang-wasm-wasi-enum-metadata.cpp")
+set(_generator_script
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate-slang-bindings.py"
+)
+set(_enum_meta_cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/slang-wasm-wasi-enum-metadata.cpp"
+)
 
 # `cmake --build` reruns the generator whenever slang.h or the
 # generator script itself changes, without requiring a fresh `cmake`

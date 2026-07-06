@@ -319,7 +319,11 @@ static void emitDeclReflectionJson(slang::DeclReflection* decl, Slang::PrettyWri
 // free it with slang_wasm_free. Shared by writeDiagOut (a single slang::IBlob)
 // and writeDiagOutString (diagnostics accumulated from multiple sources into
 // one std::string).
-static void writeDiagOutBytes(const void* data, size_t size, uint32_t* diagPtrOut, uint32_t* diagLenOut)
+static void writeDiagOutBytes(
+    const void* data,
+    size_t size,
+    uint32_t* diagPtrOut,
+    uint32_t* diagLenOut)
 {
     if (!diagPtrOut || !diagLenOut)
         return;
@@ -358,7 +362,10 @@ static void writeDiagOut(slang::IBlob* blob, uint32_t* diagPtrOut, uint32_t* dia
 
 // As writeDiagOut, but for diagnostics already accumulated (e.g. via
 // appendBlob) from more than one Slang call into a single std::string.
-static void writeDiagOutString(const std::string& diagnostics, uint32_t* diagPtrOut, uint32_t* diagLenOut)
+static void writeDiagOutString(
+    const std::string& diagnostics,
+    uint32_t* diagPtrOut,
+    uint32_t* diagLenOut)
 {
     writeDiagOutBytes(diagnostics.data(), diagnostics.size(), diagPtrOut, diagLenOut);
 }
@@ -1025,9 +1032,11 @@ extern "C" int32_t slang_wasm_type_conformances_add(
             // findTypeByName gives no diagnostic blob of its own, so synthesize
             // a message naming whichever lookup(s) failed.
             if (!concreteType)
-                diagnostics += "error: type '" + concreteTypeNameStr + "' not found in module layout\n";
+                diagnostics +=
+                    "error: type '" + concreteTypeNameStr + "' not found in module layout\n";
             if (!interfaceType)
-                diagnostics += "error: type '" + interfaceTypeNameStr + "' not found in module layout\n";
+                diagnostics +=
+                    "error: type '" + interfaceTypeNameStr + "' not found in module layout\n";
             writeDiagOutString(diagnostics, diagPtrOut, diagLenOut);
             return -1;
         }
