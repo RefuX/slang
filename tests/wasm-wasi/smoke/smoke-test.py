@@ -277,7 +277,90 @@ def test_handle_robustness(abi: Abi, metadata: dict) -> None:
     check(throwaway_session != 0, "slang_wasm_session_create failed")
     abi.call("slang_wasm_session_destroy", throwaway_session)
     abi.call("slang_wasm_session_destroy", throwaway_session)  # must not double-free
-    print("handle robustness: unknown and double-destroyed handles handled safely")
+
+    # Every entry point that wraps its body in try/catch (see slang-wasm-wasi.cpp's
+    # header comment) must convert the SLANG_RELEASE_ASSERT thrown for an unknown
+    # module handle into a failed result with its own diagnostic text, not trap
+    # the instance.
+    bogus_module = 0xFFFFFFFE
+    for export_name, expected_diag_fragment in (
+        ("slang_wasm_module_serialize", "module serialization aborted"),
+        ("slang_wasm_module_disassemble", "disassembly aborted"),
+        ("slang_wasm_module_decl_reflection_json", "decl reflection aborted"),
+    ):
+        result = abi.call(export_name, bogus_module)
+        succeeded, _, diagnostics = read_result(abi, result)
+        check(not succeeded, f"{export_name}(unknown module) unexpectedly succeeded")
+        check(
+            expected_diag_fragment in diagnostics,
+            f"{export_name}(unknown module) diagnostics missing {expected_diag_fragment!r}: {diagnostics!r}",
+        )
+        abi.call("slang_wasm_result_destroy", result)
+
+    spec_args = abi.call("slang_wasm_spec_args_create")
+    entry_ptr, entry_len = abi.alloc(b"main")
+    specialized_result = abi.call(
+        "slang_wasm_compile_specialized_entry_point", bogus_module, entry_ptr, entry_len, spec_args, 0, 0
+    )
+    specialized_succeeded, _, specialized_diag = read_result(abi, specialized_result)
+    check(not specialized_succeeded, "compile_specialized_entry_point(unknown module) unexpectedly succeeded")
+    check(
+        "specialization aborted" in specialized_diag,
+        f"compile_specialized_entry_point diagnostics missing 'specialization aborted': {specialized_diag!r}",
+    )
+    abi.call("slang_wasm_result_destroy", specialized_result)
+    abi.free(entry_ptr)
+
+    # slang_wasm_session_create2 requires at least one target; both an empty
+    # (freshly created, unpopulated) target list and a bare 0 handle must
+    # return 0 rather than crash.
+    empty_targets = abi.call("slang_wasm_target_list_create")
+    check(
+        abi.call("slang_wasm_session_create2", empty_targets, 0, 0, 0) == 0,
+        "session_create2 with an empty target list should return 0",
+    )
+    check(
+        abi.call("slang_wasm_session_create2", 0, 0, 0, 0) == 0,
+        "session_create2 with a 0 target list handle should return 0",
+    )
+
+    # The instance must still be fully usable after all of the above.
+    recovery_session = abi.call("slang_wasm_session_create", spirv_target, 0, 0)
+    check(recovery_session != 0, "slang_wasm_session_create failed after handle-robustness checks")
+    abi.call("slang_wasm_session_destroy", recovery_session)
+
+    print("handle robustness: unknown handles, catch blocks, and empty-target session_create2 handled safely")
+
+
+def test_null_argument_defense(abi: Abi, metadata: dict) -> None:
+    """A null (ptr, len) argument with a non-zero len -- as could happen if a
+    caller forwards slang_wasm_alloc's null return on allocation failure
+    without checking it -- must be treated as an empty string (toStr's
+    documented contract), not undefined behavior."""
+    spirv_target = metadata["Target"]["SPIRV"]
+    session = abi.call("slang_wasm_session_create", spirv_target, 0, 0)
+    check(session != 0, "slang_wasm_session_create failed")
+
+    trivial_shader = '[shader("compute")] [numthreads(1,1,1)] void main() {}'
+    src_ptr, src_len = abi.alloc(trivial_shader.encode("utf-8"))
+    entry_ptr, entry_len = abi.alloc(b"main")
+
+    # name = (nullptr, 5): toStr(nullptr, 5) must yield "", not read 5 bytes
+    # from a null pointer.
+    result = abi.call("slang_wasm_compile", session, 0, 5, src_ptr, src_len, entry_ptr, entry_len, 0)
+    check(result != 0, "slang_wasm_compile returned no result object for a null name pointer")
+    succeeded, code, diagnostics = read_result(abi, result)
+    check(
+        succeeded,
+        f"null name pointer (treated as empty string) should still compile. Diagnostics:\n{diagnostics}",
+    )
+    check(len(code) > 0, "null name pointer compile produced empty code")
+
+    abi.call("slang_wasm_result_destroy", result)
+    abi.call("slang_wasm_session_destroy", session)
+    abi.free(src_ptr)
+    abi.free(entry_ptr)
+    print("null argument defense: (nullptr, len>0) name treated as empty string: OK")
 
 
 def test_enum_resolvers(abi: Abi, metadata: dict) -> None:
@@ -574,6 +657,7 @@ def main() -> int:
         ),
         ("failure path", lambda: test_failure_path(abi, metadata)),
         ("handle robustness", lambda: test_handle_robustness(abi, metadata)),
+        ("null argument defense", lambda: test_null_argument_defense(abi, metadata)),
         ("enum resolvers", lambda: test_enum_resolvers(abi, metadata)),
         (
             "multi-target session",

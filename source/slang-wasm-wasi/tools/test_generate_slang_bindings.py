@@ -19,7 +19,10 @@ or directly:
 
 import importlib.util
 import os
+import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "generate-slang-bindings.py")
@@ -64,6 +67,22 @@ class ParseEnumBodyTests(unittest.TestCase):
         self.assertEqual(
             gen.parse_enum_body(body),
             [("FLAG_NONE", 0), ("FLAG_A", 16), ("FLAG_B", 32)],
+        )
+
+    def test_keeps_suffixed_literals_and_parenthesized_shifts(self):
+        # A regex-based parser silently drops anything it can't recognize (see
+        # _eval_value's docstring), so these forms -- all valid C++ but outside
+        # the plain "1 << N" / bare-digit shapes above -- must be tolerated
+        # rather than vanish without a diagnostic.
+        body = """
+            FLAG_NONE = 0u,
+            FLAG_A = 5U,
+            FLAG_B = 0x10UL,
+            FLAG_C = (1 << 5),
+        """
+        self.assertEqual(
+            gen.parse_enum_body(body),
+            [("FLAG_NONE", 0), ("FLAG_A", 5), ("FLAG_B", 16), ("FLAG_C", 32)],
         )
 
     def test_drops_sentinel_members_without_advancing_past_them(self):
@@ -209,6 +228,79 @@ class StripPrefixTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# generate_java_enum: only ever exercised via --java-out, so they add no JDK
+# dependency.
+# ---------------------------------------------------------------------------
+
+
+class GenerateJavaEnumTests(unittest.TestCase):
+    def _spec(self):
+        return gen.EnumSpec("SlangFoo", "Foo", "Foo kind.")
+
+    def test_declares_package_and_public_enum(self):
+        source = gen.generate_java_enum(self._spec(), [("A", 0), ("B", 1)], {}, "org.example.enums")
+        self.assertIn("package org.example.enums;", source)
+        self.assertIn("public enum Foo {", source)
+
+    def test_members_are_comma_separated_with_a_trailing_semicolon(self):
+        source = gen.generate_java_enum(self._spec(), [("A", 0), ("B", 1), ("C", 2)], {}, "p")
+        self.assertIn("A(0),", source)
+        self.assertIn("B(1),", source)
+        self.assertIn("C(2);", source)
+        self.assertNotIn("C(2),", source)
+
+    def test_javadoc_present_only_for_commented_members(self):
+        source = gen.generate_java_enum(
+            self._spec(), [("A", 0), ("B", 1)], {"A": "The A case."}, "p"
+        )
+        self.assertIn("/** The A case. */", source)
+        # The line directly above each member's declaration should carry a
+        # Javadoc comment only when that member has an entry in `comments`.
+        lines = source.splitlines()
+        a_index = next(i for i, line in enumerate(lines) if line.strip().startswith("A(0)"))
+        b_index = next(i for i, line in enumerate(lines) if line.strip().startswith("B(1)"))
+        self.assertIn("/**", lines[a_index - 1])
+        self.assertNotIn("/**", lines[b_index - 1])
+
+    def test_includes_generated_annotation_and_value_lookup(self):
+        source = gen.generate_java_enum(self._spec(), [("A", 0), ("B", 5)], {}, "p")
+        self.assertIn("@Generated(", source)
+        self.assertIn("public static Foo fromValue(int v)", source)
+        self.assertIn("this.value = value;", source)
+
+
+# ---------------------------------------------------------------------------
+# main()'s --java-out CLI path, against the real include/slang.h. Writes to a
+# temporary directory and only checks the emitted text, so this stays a pure
+# filesystem/Python test with no JDK dependency.
+# ---------------------------------------------------------------------------
+
+
+class MainJavaOutputTests(unittest.TestCase):
+    def test_java_out_writes_one_file_per_enum_with_expected_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cpp_out = os.path.join(tmp, "enum-metadata.cpp")
+            java_out = os.path.join(tmp, "java")
+            argv = [
+                "generate-slang-bindings.py",
+                "--slang-h", SLANG_H,
+                "--cpp-out", cpp_out,
+                "--java-out", java_out,
+                "--java-package", "test.pkg",
+            ]
+            with patch.object(sys, "argv", argv):
+                gen.main()
+
+            target_java = os.path.join(java_out, "Target.java")
+            self.assertTrue(os.path.exists(target_java), "Target.java was not written")
+            with open(target_java, encoding="utf-8") as f:
+                source = f.read()
+            self.assertIn("package test.pkg;", source)
+            self.assertIn("public enum Target {", source)
+            self.assertIn("SPIRV(6)", source)
+
+
+# ---------------------------------------------------------------------------
 # Load-bearing invariants against the real include/slang.h. These exist so a
 # slang.h refactor that changes an enum's declaration shape enough to break
 # the regex heuristics fails this test instead of silently shipping a
@@ -249,6 +341,26 @@ class RealSlangHeaderTests(unittest.TestCase):
         spec = next(s for s in gen.ENUM_CONFIG if s.c_name == "SlangTargetFlags")
         members = dict(gen.extract_prefixed_members(self.content, spec.prefix))
         self.assertIn("SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM", members)
+
+    # These names aren't arbitrary: smoke-test.py actually consumes each one
+    # through the ABI, so a regex-drift drop here fails at the parsing layer
+    # instead of as a confusing downstream smoke-test failure.
+
+    def test_target_hlsl_has_the_expected_value(self):
+        members = dict(gen.extract_named_enum(self.content, "SlangCompileTarget"))
+        self.assertEqual(members["SLANG_HLSL"], 5)
+
+    def test_stage_compute_has_the_expected_value(self):
+        members = dict(gen.extract_named_enum(self.content, "SlangStage"))
+        self.assertEqual(members["SLANG_STAGE_COMPUTE"], 6)
+
+    def test_compiler_option_name_optimization_has_the_expected_value(self):
+        members = dict(gen.extract_named_enum(self.content, "CompilerOptionName"))
+        self.assertEqual(members["Optimization"], 46)
+
+    def test_optimization_level_high_has_the_expected_value(self):
+        members = dict(gen.extract_named_enum(self.content, "SlangOptimizationLevel"))
+        self.assertEqual(members["SLANG_OPTIMIZATION_LEVEL_HIGH"], 2)
 
 
 if __name__ == "__main__":

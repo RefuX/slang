@@ -16,26 +16,21 @@ endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(_slang_h "${slang_SOURCE_DIR}/include/slang.h")
-set(_enum_meta_cpp
-    "${CMAKE_CURRENT_SOURCE_DIR}/slang-wasm-wasi-enum-metadata.cpp"
-)
+set(_generator_script "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate-slang-bindings.py")
+set(_enum_meta_cpp "${CMAKE_CURRENT_SOURCE_DIR}/slang-wasm-wasi-enum-metadata.cpp")
 
-if(${_slang_h} IS_NEWER_THAN ${_enum_meta_cpp})
-    message(STATUS "slang-wasm-wasi: regenerating enum bindings from slang.h")
-    execute_process(
-        COMMAND
-            ${Python3_EXECUTABLE}
-            "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate-slang-bindings.py"
-            "--slang-h" "${_slang_h}" "--cpp-out" "${_enum_meta_cpp}"
-        RESULT_VARIABLE _gen_result
-    )
-    if(NOT _gen_result EQUAL 0)
-        message(
-            FATAL_ERROR
-            "generate-slang-bindings.py failed (exit ${_gen_result})"
-        )
-    endif()
-endif()
+# `cmake --build` reruns the generator whenever slang.h or the
+# generator script itself changes, without requiring a fresh `cmake`
+# reconfigure first.
+add_custom_command(
+    OUTPUT "${_enum_meta_cpp}"
+    COMMAND
+        "${Python3_EXECUTABLE}" "${_generator_script}" "--slang-h" "${_slang_h}"
+        "--cpp-out" "${_enum_meta_cpp}"
+    DEPENDS "${_slang_h}" "${_generator_script}"
+    COMMENT "slang-wasm-wasi: regenerating enum bindings from slang.h"
+    VERBATIM
+)
 
 # libunwind is not auto-linked by -fwasm-exceptions in wasi-sdk; the eh/
 # sysroot subdirectory holds the EH-aware variant.

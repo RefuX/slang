@@ -83,6 +83,14 @@ jobs:
           restore-keys: |
             sccache-${{ inputs.os }}-${{ inputs.compiler }}-${{ inputs.platform }}-${{ inputs.config }}-
 
+      - name: Cache wasi-sdk
+        if: inputs.platform == 'wasi'
+        continue-on-error: true
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: /tmp/wasi-sdk-33.0-x86_64-linux
+          key: wasi-sdk-33.0-x86_64-linux
+
       # Authenticate to Google Cloud for LLVM downloads (skip for fork PRs)
       - name: Authenticate to Google Cloud
         if: env.IS_FORK_PR != 'true'
@@ -184,10 +192,13 @@ jobs:
             # Pin wasi-sdk to a known-good version, matching docs/building.md's
             # WASI-SDK Build section, for the same reason the emsdk install
             # above is pinned: an unpinned "latest" could silently break this
-            # build on an unrelated wasi-sdk release.
-            curl -L -o /tmp/wasi-sdk.tar.gz \
-              https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-33/wasi-sdk-33.0-x86_64-linux.tar.gz
-            tar xf /tmp/wasi-sdk.tar.gz -C /tmp
+            # build on an unrelated wasi-sdk release. Skip the download/extract
+            # entirely when the "Cache wasi-sdk" step above already restored it.
+            if [ ! -d /tmp/wasi-sdk-33.0-x86_64-linux ]; then
+              curl -L -o /tmp/wasi-sdk.tar.gz \
+                https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-33/wasi-sdk-33.0-x86_64-linux.tar.gz
+              tar xf /tmp/wasi-sdk.tar.gz -C /tmp
+            fi
             export WASI_SDK_PATH=/tmp/wasi-sdk-33.0-x86_64-linux
             cmake --workflow --preset generators --fresh
             mkdir generators

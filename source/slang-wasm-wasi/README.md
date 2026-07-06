@@ -50,10 +50,11 @@ allocator, passing `(ptr, len)` strings, reading result buffers, resolving enum 
 See [Building Slang From Source § WASI-SDK Build](../../docs/building.md#wasi-sdk-build-slang-wasm-wasi)
 for the canonical prerequisites and build steps.
 
-One detail specific to this module: at configure time CMake checks whether [include/slang.h](../../include/slang.h) is
-newer than the generated file (or whether the generated file exists at all — it is gitignored, not
-committed). If either is true, it automatically runs the enum binding generator
-to (re)create the C++ metadata blob.
+One detail specific to this module: the C++ metadata blob is a build-time custom command output, not
+committed to the repository (it is gitignored). `cmake --build` automatically (re)runs the enum
+binding generator whenever [include/slang.h](../../include/slang.h) or the generator script itself
+is newer than the generated file, or the generated file doesn't exist at all yet — no separate
+`cmake` reconfigure step is needed.
 
 ### Enum binding generator
 
@@ -94,8 +95,8 @@ typed Java `enum` classes generated directly from `slang.h`, so a Java consumer 
 `slang-wasm-endive` never needs to call
 `slang_wasm_enum_metadata_ptr/len` or parse JSON at all.
 
-The blob is regenerated from `include/slang.h` on every build (see the CMake step above), so its
-exact set of top-level keys and members can grow or change across Slang versions.
+The blob is regenerated from `include/slang.h` whenever it changes (see the CMake step above), so
+its exact set of top-level keys and members can grow or change across Slang versions.
 
 It follows the same pattern as `smoke-test.py`: after calling `_initialize`, it resolves the
 metadata once, then passes the parsed dictionary into each later test:

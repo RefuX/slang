@@ -58,7 +58,7 @@ extern "C"
     // caller and must be destroyed (or are consumed exactly once by
     // slang_wasm_session_create2, which destroys them internally on return).
 
-    using SlangWasmTargetList = uint32_t;
+    typedef uint32_t SlangWasmTargetList;
 
     // Create an empty list of compile targets.
     SlangWasmTargetList slang_wasm_target_list_create(void);
@@ -74,7 +74,7 @@ extern "C"
 
     void slang_wasm_target_list_destroy(SlangWasmTargetList list);
 
-    using SlangWasmMacroList = uint32_t;
+    typedef uint32_t SlangWasmMacroList;
 
     // Create an empty list of preprocessor macro definitions.
     SlangWasmMacroList slang_wasm_macro_list_create(void);
@@ -89,7 +89,7 @@ extern "C"
 
     void slang_wasm_macro_list_destroy(SlangWasmMacroList list);
 
-    using SlangWasmPathList = uint32_t;
+    typedef uint32_t SlangWasmPathList;
 
     // Create an empty list of module search paths.
     SlangWasmPathList slang_wasm_path_list_create(void);
@@ -98,7 +98,7 @@ extern "C"
 
     void slang_wasm_path_list_destroy(SlangWasmPathList list);
 
-    using SlangWasmOptions = uint32_t;
+    typedef uint32_t SlangWasmOptions;
 
     // Create an empty list of session-wide compiler option entries
     // (slang::CompilerOptionEntry), keyed by SlangCompilerOptionName.
@@ -116,7 +116,7 @@ extern "C"
 
     // ── Session ───────────────────────────────────────────────────────────────────
 
-    using SlangWasmSession = uint32_t;
+    typedef uint32_t SlangWasmSession;
 
     // Create a compile session configured for one target format. `targetFormat` is
     // a SlangCompileTarget enum value (e.g. SLANG_SPIRV). `profile` may be NULL or
@@ -149,12 +149,12 @@ extern "C"
     // session, unlike slang_wasm_compile which loads, compiles, and discards a
     // module in one call.
 
-    using SlangWasmModule = uint32_t;
+    typedef uint32_t SlangWasmModule;
 
     // Forward declaration: SlangWasmResult is defined fully in the "Compilation"
     // section below, but slang_wasm_module_serialize (a module-handle operation)
     // needs the type here too.
-    using SlangWasmResult = uint32_t;
+    typedef uint32_t SlangWasmResult;
 
     // Load `source` as module `name` into `session`. Returns 0 on failure. `diagPtrOut`/
     // `diagLenOut` (each a pointer into the module's own linear memory, e.g. from
@@ -214,7 +214,7 @@ extern "C"
     // only through a host-bound resource (e.g. `ParameterBlock<IMaterial>`),
     // that's nothing, and the compile fails until at least one conformance is added.
 
-    using SlangWasmTypeConformances = uint32_t;
+    typedef uint32_t SlangWasmTypeConformances;
 
     // Create an empty list of type conformances bound to `module`. Unlike
     // SlangWasmSpecArgs, resolution happens immediately in
@@ -240,7 +240,7 @@ extern "C"
     //
     // Specialize a generic shader for concrete types/values before compiling.
 
-    using SlangWasmSpecArgs = uint32_t;
+    typedef uint32_t SlangWasmSpecArgs;
 
     // Create an empty list of specialization arguments.
     SlangWasmSpecArgs slang_wasm_spec_args_create(void);

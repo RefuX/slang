@@ -96,14 +96,17 @@ def _eval_value(expr: str, member_map: dict) -> Optional[int]:
     Callers treat None as a signal to skip the member.
     """
     expr = expr.strip()
-    # Hex literal
-    if re.match(r"^-?0x[0-9A-Fa-f]+$", expr):
-        return int(expr, 16)
-    # Decimal literal
-    if re.match(r"^-?\d+$", expr):
-        return int(expr)
-    # Bit-shift literal: 1 << N
-    m = re.match(r"^1\s*<<\s*(\d+)$", expr)
+    # Hex literal, tolerating a C++ integer-literal suffix (u/U/l/L in any
+    # combination, e.g. 0x10UL) so a suffixed value isn't silently dropped.
+    m = re.match(r"^(-?0x[0-9A-Fa-f]+)[uUlL]*$", expr)
+    if m:
+        return int(m.group(1), 16)
+    # Decimal literal, tolerating the same suffix forms (e.g. 5u).
+    m = re.match(r"^(-?\d+)[uUlL]*$", expr)
+    if m:
+        return int(m.group(1))
+    # Bit-shift literal: 1 << N, optionally wrapped in parentheses (e.g. (1 << 4)).
+    m = re.match(r"^\(?\s*1\s*<<\s*(\d+)\s*\)?$", expr)
     if m:
         return 1 << int(m.group(1))
     # Reference to a previously-seen member (alias) — skip
