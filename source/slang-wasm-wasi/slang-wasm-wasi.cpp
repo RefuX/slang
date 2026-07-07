@@ -7,8 +7,11 @@
 //   - One IGlobalSession is created lazily on the first slang_wasm_session_create
 //     call and reused for the lifetime of the module instance.
 //   - Sessions and results are stored in simple handle tables (monotonically
-//     increasing uint32_t keys, 0 reserved as invalid). The tables are not
-//     thread-safe; the module is built single-threaded (THREAD_MODEL=single).
+//     increasing uint32_t keys, 0 reserved as invalid, tagged with a HandleKind
+//     in the top byte so a handle of the wrong kind can never collide with a
+//     same-numbered handle in a different table; see HandleKind below). The
+//     tables are not thread-safe; the module is built single-threaded
+//     (THREAD_MODEL=single).
 //   - Every public entry point wraps its body in try/catch so a C++ exception
 //     from an internal Slang assert/abort is converted to a failed result instead
 //     of propagating as a WASM trap that would destroy the instance.
@@ -151,15 +154,42 @@ static uint32_t g_nextModuleHandle = 1;
 static uint32_t g_nextSpecArgsHandle = 1;
 static uint32_t g_nextTypeConformancesHandle = 1;
 
-// Insert `value` into `table` under a freshly allocated handle from `*nextHandle`.
-template<typename T>
-static uint32_t insertHandle(Dictionary<uint32_t, T*>& table, uint32_t* nextHandle, T* value)
+// Discriminant embedded in the top byte of every handle value (see
+// insertHandle), one per handle table above.
+enum class HandleKind : uint32_t
 {
-    const uint32_t handle = (*nextHandle)++;
+    Session = 1,
+    Result,
+    TargetList,
+    MacroList,
+    PathList,
+    Options,
+    Module,
+    SpecArgs,
+    TypeConformances,
+};
+
+static const uint32_t kHandleKindShift = 24;
+static const uint32_t kHandleCounterMask = (1u << kHandleKindShift) - 1;
+
+// Insert `value` into `table` under a freshly allocated handle from
+// `*nextHandle`, tagged with `kind` in the handle's top byte (see HandleKind).
+template<typename T>
+static uint32_t insertHandle(
+    Dictionary<uint32_t, T*>& table,
+    HandleKind kind,
+    uint32_t* nextHandle,
+    T* value)
+{
+    const uint32_t counter = (*nextHandle)++;
+    SLANG_RELEASE_ASSERT(counter <= kHandleCounterMask);
+    const uint32_t handle = (static_cast<uint32_t>(kind) << kHandleKindShift) | counter;
     table[handle] = value;
     return handle;
 }
 
+// Look up `handle` in `table`, returning the stored pointer or nullptr if the
+// handle is unknown (including handle == 0, which is always reserved as invalid).
 template<typename T>
 static T* getHandle(const Dictionary<uint32_t, T*>& table, uint32_t handle)
 {
@@ -169,6 +199,8 @@ static T* getHandle(const Dictionary<uint32_t, T*>& table, uint32_t handle)
     return value;
 }
 
+// Pop and return the value for `handle` from `table`, or nullptr if absent.
+// Used to consume a builder handle exactly once (e.g. inside session_create2).
 template<typename T>
 static T* takeHandle(Dictionary<uint32_t, T*>& table, uint32_t handle)
 {
@@ -187,7 +219,8 @@ static std::pair<WasmResult*, uint32_t> makeWasmResult()
     try
     {
         auto* result = new WasmResult();
-        const uint32_t resultHandle = insertHandle(g_results, &g_nextResultHandle, result);
+        const uint32_t resultHandle =
+            insertHandle(g_results, HandleKind::Result, &g_nextResultHandle, result);
         return {result, resultHandle};
     }
     catch (...)
@@ -513,7 +546,11 @@ extern "C" SlangWasmTargetList slang_wasm_target_list_create(void)
 {
     try
     {
-        return insertHandle(g_targetLists, &g_nextTargetListHandle, new WasmTargetList());
+        return insertHandle(
+            g_targetLists,
+            HandleKind::TargetList,
+            &g_nextTargetListHandle,
+            new WasmTargetList());
     }
     catch (...)
     {
@@ -561,7 +598,11 @@ extern "C" SlangWasmMacroList slang_wasm_macro_list_create(void)
 {
     try
     {
-        return insertHandle(g_macroLists, &g_nextMacroListHandle, new WasmMacroList());
+        return insertHandle(
+            g_macroLists,
+            HandleKind::MacroList,
+            &g_nextMacroListHandle,
+            new WasmMacroList());
     }
     catch (...)
     {
@@ -596,7 +637,11 @@ extern "C" SlangWasmPathList slang_wasm_path_list_create(void)
 {
     try
     {
-        return insertHandle(g_pathLists, &g_nextPathListHandle, new WasmPathList());
+        return insertHandle(
+            g_pathLists,
+            HandleKind::PathList,
+            &g_nextPathListHandle,
+            new WasmPathList());
     }
     catch (...)
     {
@@ -629,7 +674,11 @@ extern "C" SlangWasmOptions slang_wasm_options_create(void)
 {
     try
     {
-        return insertHandle(g_optionLists, &g_nextOptionsHandle, new WasmOptions());
+        return insertHandle(
+            g_optionLists,
+            HandleKind::Options,
+            &g_nextOptionsHandle,
+            new WasmOptions());
     }
     catch (...)
     {
@@ -755,7 +804,11 @@ extern "C" SlangWasmSession slang_wasm_session_create2(
         if (SLANG_FAILED(r))
             return 0;
 
-        return insertHandle(g_sessions, &g_nextSessionHandle, new WasmSession{std::move(session)});
+        return insertHandle(
+            g_sessions,
+            HandleKind::Session,
+            &g_nextSessionHandle,
+            new WasmSession{std::move(session)});
     }
     catch (...)
     {
@@ -804,7 +857,7 @@ static SlangWasmModule makeWasmModule(ComPtr<slang::ISession> session, slang::IM
         }
     }
 
-    return insertHandle(g_modules, &g_nextModuleHandle, wasmModule);
+    return insertHandle(g_modules, HandleKind::Module, &g_nextModuleHandle, wasmModule);
 }
 
 extern "C" SlangWasmModule slang_wasm_session_load_module(
@@ -974,7 +1027,11 @@ extern "C" SlangWasmTypeConformances slang_wasm_type_conformances_create(
         auto* conformances = new WasmTypeConformances();
         conformances->session = wasmModule->session;
         conformances->module = wasmModule->module;
-        return insertHandle(g_typeConformancesLists, &g_nextTypeConformancesHandle, conformances);
+        return insertHandle(
+            g_typeConformancesLists,
+            HandleKind::TypeConformances,
+            &g_nextTypeConformancesHandle,
+            conformances);
     }
     catch (...)
     {
@@ -1076,7 +1133,11 @@ extern "C" SlangWasmSpecArgs slang_wasm_spec_args_create(void)
 {
     try
     {
-        return insertHandle(g_specArgsLists, &g_nextSpecArgsHandle, new WasmSpecArgs());
+        return insertHandle(
+            g_specArgsLists,
+            HandleKind::SpecArgs,
+            &g_nextSpecArgsHandle,
+            new WasmSpecArgs());
     }
     catch (...)
     {
