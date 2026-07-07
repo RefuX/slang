@@ -4462,6 +4462,14 @@ void collectParameterLists(
 
 bool isConstExprVar(Decl* decl)
 {
+    // The ConstExprModifier branch is only reachable for ParamDecl, because
+    // checkModifier() rewrites ConstExprModifier → ConstModifier for all other
+    // VarDeclBase nodes (see slang-check-modifier.cpp). On parameters, constexpr
+    // means "argument must be a compile-time constant at the call site".
+    //
+    // The HLSLStaticModifier + ConstModifier branch matches any `static const`
+    // variable declaration (including those originally written as `static constexpr`
+    // and rewritten during semantic checking).
     if (decl->hasModifier<ConstExprModifier>())
     {
         return true;
@@ -10728,9 +10736,9 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
 
     LoweredValInfo visitTypeCoercionConstraintDecl(TypeCoercionConstraintDecl* decl)
     {
-        if (const auto globalGenericParamDecl = as<GlobalGenericParamDecl>(decl->parentDecl))
+        if (const auto globalGenericParamDecl = as<GlobalGenericParamDecl>(decl->parentDecl);
+            globalGenericParamDecl)
         {
-            SLANG_UNUSED(globalGenericParamDecl);
             auto builder = getBuilder();
             auto fromType = lowerType(context, decl->fromType.Ptr());
             auto toType = lowerType(context, decl->toType);
@@ -10746,9 +10754,9 @@ struct DeclLoweringVisitor : DeclVisitor<DeclLoweringVisitor, LoweredValInfo>
 
     LoweredValInfo visitNonEmptyPackConstraintDecl(NonEmptyPackConstraintDecl* decl)
     {
-        if (const auto globalGenericParamDecl = as<GlobalGenericParamDecl>(decl->parentDecl))
+        if (const auto globalGenericParamDecl = as<GlobalGenericParamDecl>(decl->parentDecl);
+            globalGenericParamDecl)
         {
-            SLANG_UNUSED(globalGenericParamDecl);
             auto witnessType = getBuilder()->getWitnessTableType(getBuilder()->getVoidType());
             auto inst = getBuilder()->emitGlobalGenericParam(witnessType);
             addLinkageDecoration(context, inst, decl);
