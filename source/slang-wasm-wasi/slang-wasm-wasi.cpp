@@ -101,7 +101,8 @@ struct WasmResult
 // known — to resolve into a TypeReflection*).
 struct WasmSpecArgEntry
 {
-    slang::SpecializationArg::Kind kind; // Type: `value` is a type name; Expr: `value` is an expression.
+    // Type: `value` is a type name; Expr: `value` is an expression.
+    slang::SpecializationArg::Kind kind;
     String value;
 };
 
@@ -132,31 +133,10 @@ struct WasmTypeConformances
     List<ComPtr<slang::ITypeConformance>> conformances;
 };
 
-// ── Global state ──────────────────────────────────────────────────────────────
-
-static ComPtr<slang::IGlobalSession> g_globalSession;
-
-static Dictionary<uint32_t, WasmSession*> g_sessions;
-static Dictionary<uint32_t, WasmResult*> g_results;
-static Dictionary<uint32_t, WasmTargetList*> g_targetLists;
-static Dictionary<uint32_t, WasmMacroList*> g_macroLists;
-static Dictionary<uint32_t, WasmPathList*> g_pathLists;
-static Dictionary<uint32_t, WasmOptions*> g_optionLists;
-static Dictionary<uint32_t, WasmModule*> g_modules;
-static Dictionary<uint32_t, WasmSpecArgs*> g_specArgsLists;
-static Dictionary<uint32_t, WasmTypeConformances*> g_typeConformancesLists;
-static uint32_t g_nextSessionHandle = 1;
-static uint32_t g_nextResultHandle = 1;
-static uint32_t g_nextTargetListHandle = 1;
-static uint32_t g_nextMacroListHandle = 1;
-static uint32_t g_nextPathListHandle = 1;
-static uint32_t g_nextOptionsHandle = 1;
-static uint32_t g_nextModuleHandle = 1;
-static uint32_t g_nextSpecArgsHandle = 1;
-static uint32_t g_nextTypeConformancesHandle = 1;
+// ── Runtime state ─────────────────────────────────────────────────────────────
 
 // Discriminant embedded in the top byte of every handle value (see
-// insertHandle), one per handle table above.
+// insertHandle), one per handle table in WasmRuntime below.
 enum class HandleKind : uint32_t
 {
     Session = 1,
@@ -172,6 +152,35 @@ enum class HandleKind : uint32_t
 
 static const uint32_t kHandleKindShift = 24;
 static const uint32_t kHandleCounterMask = (1u << kHandleKindShift) - 1;
+
+// All per-instance state for this WASM module. 
+// A WASI reactor only ever has one live instance of this module at a time.
+struct WasmRuntime
+{
+    ComPtr<slang::IGlobalSession> globalSession;
+
+    Dictionary<uint32_t, WasmSession*> sessions;
+    Dictionary<uint32_t, WasmResult*> results;
+    Dictionary<uint32_t, WasmTargetList*> targetLists;
+    Dictionary<uint32_t, WasmMacroList*> macroLists;
+    Dictionary<uint32_t, WasmPathList*> pathLists;
+    Dictionary<uint32_t, WasmOptions*> optionLists;
+    Dictionary<uint32_t, WasmModule*> modules;
+    Dictionary<uint32_t, WasmSpecArgs*> specArgsLists;
+    Dictionary<uint32_t, WasmTypeConformances*> typeConformancesLists;
+
+    uint32_t nextSessionHandle = 1;
+    uint32_t nextResultHandle = 1;
+    uint32_t nextTargetListHandle = 1;
+    uint32_t nextMacroListHandle = 1;
+    uint32_t nextPathListHandle = 1;
+    uint32_t nextOptionsHandle = 1;
+    uint32_t nextModuleHandle = 1;
+    uint32_t nextSpecArgsHandle = 1;
+    uint32_t nextTypeConformancesHandle = 1;
+};
+
+static WasmRuntime g_runtime;
 
 // Insert `value` into `table` under a freshly allocated handle from
 // `*nextHandle`, tagged with `kind` in the handle's top byte (see HandleKind).
@@ -220,8 +229,11 @@ static std::pair<WasmResult*, uint32_t> makeWasmResult()
     try
     {
         auto* result = new WasmResult();
-        const uint32_t resultHandle =
-            insertHandle(g_results, HandleKind::Result, &g_nextResultHandle, result);
+        const uint32_t resultHandle = insertHandle(
+            g_runtime.results,
+            HandleKind::Result,
+            &g_runtime.nextResultHandle,
+            result);
         return {result, resultHandle};
     }
     catch (...)
@@ -250,10 +262,10 @@ static String toStr(const char* ptr, uint32_t len)
 // Ensure the single shared IGlobalSession exists. Returns false on failure.
 static bool ensureGlobalSession()
 {
-    if (g_globalSession)
+    if (g_runtime.globalSession)
         return true;
     const SlangGlobalSessionDesc desc = {};
-    const SlangResult r = slang_createGlobalSession2(&desc, g_globalSession.writeRef());
+    const SlangResult r = slang_createGlobalSession2(&desc, g_runtime.globalSession.writeRef());
     return SLANG_SUCCEEDED(r);
 }
 
@@ -494,7 +506,8 @@ static void appendTypeConformances(
     SlangWasmTypeConformances typeConformancesHandle,
     List<slang::IComponentType*>& components)
 {
-    WasmTypeConformances* conformances = getHandle(g_typeConformancesLists, typeConformancesHandle);
+    WasmTypeConformances* conformances =
+        getHandle(g_runtime.typeConformancesLists, typeConformancesHandle);
     if (!conformances)
         return;
     for (auto& conformance : conformances->conformances)
@@ -548,9 +561,9 @@ extern "C" SlangWasmTargetList slang_wasm_target_list_create(void)
     try
     {
         return insertHandle(
-            g_targetLists,
+            g_runtime.targetLists,
             HandleKind::TargetList,
-            &g_nextTargetListHandle,
+            &g_runtime.nextTargetListHandle,
             new WasmTargetList());
     }
     catch (...)
@@ -566,7 +579,7 @@ extern "C" void slang_wasm_target_list_add(
     uint32_t profileLen,
     uint32_t flags)
 {
-    WasmTargetList* list = getHandle(g_targetLists, listHandle);
+    WasmTargetList* list = getHandle(g_runtime.targetLists, listHandle);
     SLANG_RELEASE_ASSERT(list);
 
     // ensureGlobalSession()/spFindProfile() can throw; catch it here (no result
@@ -578,10 +591,10 @@ extern "C" void slang_wasm_target_list_add(
         slang::TargetDesc target = {};
         target.format = static_cast<SlangCompileTarget>(format);
         target.flags = static_cast<SlangTargetFlags>(flags);
-        if (profile && profileLen > 0 && g_globalSession)
+        if (profile && profileLen > 0 && g_runtime.globalSession)
         {
             const String profileStr(profile, profile + profileLen);
-            target.profile = spFindProfile(g_globalSession, profileStr.getBuffer());
+            target.profile = spFindProfile(g_runtime.globalSession, profileStr.getBuffer());
         }
         list->targets.add(target);
     }
@@ -592,7 +605,7 @@ extern "C" void slang_wasm_target_list_add(
 
 extern "C" void slang_wasm_target_list_destroy(SlangWasmTargetList handle)
 {
-    delete takeHandle(g_targetLists, handle);
+    delete takeHandle(g_runtime.targetLists, handle);
 }
 
 extern "C" SlangWasmMacroList slang_wasm_macro_list_create(void)
@@ -600,9 +613,9 @@ extern "C" SlangWasmMacroList slang_wasm_macro_list_create(void)
     try
     {
         return insertHandle(
-            g_macroLists,
+            g_runtime.macroLists,
             HandleKind::MacroList,
-            &g_nextMacroListHandle,
+            &g_runtime.nextMacroListHandle,
             new WasmMacroList());
     }
     catch (...)
@@ -618,7 +631,7 @@ extern "C" void slang_wasm_macro_list_add(
     const char* value,
     uint32_t valueLen)
 {
-    WasmMacroList* list = getHandle(g_macroLists, listHandle);
+    WasmMacroList* list = getHandle(g_runtime.macroLists, listHandle);
     SLANG_RELEASE_ASSERT(list);
     try
     {
@@ -631,7 +644,7 @@ extern "C" void slang_wasm_macro_list_add(
 
 extern "C" void slang_wasm_macro_list_destroy(SlangWasmMacroList handle)
 {
-    delete takeHandle(g_macroLists, handle);
+    delete takeHandle(g_runtime.macroLists, handle);
 }
 
 extern "C" SlangWasmPathList slang_wasm_path_list_create(void)
@@ -639,9 +652,9 @@ extern "C" SlangWasmPathList slang_wasm_path_list_create(void)
     try
     {
         return insertHandle(
-            g_pathLists,
+            g_runtime.pathLists,
             HandleKind::PathList,
-            &g_nextPathListHandle,
+            &g_runtime.nextPathListHandle,
             new WasmPathList());
     }
     catch (...)
@@ -655,7 +668,7 @@ extern "C" void slang_wasm_path_list_add(
     const char* path,
     uint32_t pathLen)
 {
-    WasmPathList* list = getHandle(g_pathLists, listHandle);
+    WasmPathList* list = getHandle(g_runtime.pathLists, listHandle);
     SLANG_RELEASE_ASSERT(list);
     try
     {
@@ -668,7 +681,7 @@ extern "C" void slang_wasm_path_list_add(
 
 extern "C" void slang_wasm_path_list_destroy(SlangWasmPathList handle)
 {
-    delete takeHandle(g_pathLists, handle);
+    delete takeHandle(g_runtime.pathLists, handle);
 }
 
 extern "C" SlangWasmOptions slang_wasm_options_create(void)
@@ -676,9 +689,9 @@ extern "C" SlangWasmOptions slang_wasm_options_create(void)
     try
     {
         return insertHandle(
-            g_optionLists,
+            g_runtime.optionLists,
             HandleKind::Options,
-            &g_nextOptionsHandle,
+            &g_runtime.nextOptionsHandle,
             new WasmOptions());
     }
     catch (...)
@@ -693,7 +706,7 @@ extern "C" void slang_wasm_options_add_string(
     const char* val,
     uint32_t valLen)
 {
-    WasmOptions* options = getHandle(g_optionLists, optsHandle);
+    WasmOptions* options = getHandle(g_runtime.optionLists, optsHandle);
     SLANG_RELEASE_ASSERT(options);
     try
     {
@@ -710,7 +723,7 @@ extern "C" void slang_wasm_options_add_string(
 
 extern "C" void slang_wasm_options_add_int(SlangWasmOptions optsHandle, uint32_t name, int32_t val)
 {
-    WasmOptions* options = getHandle(g_optionLists, optsHandle);
+    WasmOptions* options = getHandle(g_runtime.optionLists, optsHandle);
     SLANG_RELEASE_ASSERT(options);
     try
     {
@@ -727,7 +740,7 @@ extern "C" void slang_wasm_options_add_int(SlangWasmOptions optsHandle, uint32_t
 
 extern "C" void slang_wasm_options_destroy(SlangWasmOptions handle)
 {
-    delete takeHandle(g_optionLists, handle);
+    delete takeHandle(g_runtime.optionLists, handle);
 }
 
 // ── Session ───────────────────────────────────────────────────────────────────
@@ -740,10 +753,10 @@ extern "C" SlangWasmSession slang_wasm_session_create2(
 {
     // Builders are consumed exactly once: take ownership now so they are freed
     // on every return path (failure or success) without duplicating cleanup.
-    std::unique_ptr<WasmTargetList> targets(takeHandle(g_targetLists, targetsHandle));
-    std::unique_ptr<WasmMacroList> macros(takeHandle(g_macroLists, macrosHandle));
-    std::unique_ptr<WasmPathList> paths(takeHandle(g_pathLists, pathsHandle));
-    std::unique_ptr<WasmOptions> options(takeHandle(g_optionLists, optionsHandle));
+    std::unique_ptr<WasmTargetList> targets(takeHandle(g_runtime.targetLists, targetsHandle));
+    std::unique_ptr<WasmMacroList> macros(takeHandle(g_runtime.macroLists, macrosHandle));
+    std::unique_ptr<WasmPathList> paths(takeHandle(g_runtime.pathLists, pathsHandle));
+    std::unique_ptr<WasmOptions> options(takeHandle(g_runtime.optionLists, optionsHandle));
 
     try
     {
@@ -801,14 +814,15 @@ extern "C" SlangWasmSession slang_wasm_session_create2(
         }
 
         ComPtr<slang::ISession> session;
-        const SlangResult r = g_globalSession->createSession(sessionDesc, session.writeRef());
+        const SlangResult r =
+            g_runtime.globalSession->createSession(sessionDesc, session.writeRef());
         if (SLANG_FAILED(r))
             return 0;
 
         return insertHandle(
-            g_sessions,
+            g_runtime.sessions,
             HandleKind::Session,
-            &g_nextSessionHandle,
+            &g_runtime.nextSessionHandle,
             new WasmSession{std::move(session)});
     }
     catch (...)
@@ -829,7 +843,7 @@ extern "C" SlangWasmSession slang_wasm_session_create(
 
 extern "C" void slang_wasm_session_destroy(SlangWasmSession handle)
 {
-    delete takeHandle(g_sessions, handle);
+    delete takeHandle(g_runtime.sessions, handle);
 }
 
 // ── Modules ───────────────────────────────────────────────────────────────────
@@ -858,7 +872,11 @@ static SlangWasmModule makeWasmModule(ComPtr<slang::ISession> session, slang::IM
         }
     }
 
-    return insertHandle(g_modules, HandleKind::Module, &g_nextModuleHandle, wasmModule);
+    return insertHandle(
+        g_runtime.modules,
+        HandleKind::Module,
+        &g_runtime.nextModuleHandle,
+        wasmModule);
 }
 
 extern "C" SlangWasmModule slang_wasm_session_load_module(
@@ -872,7 +890,7 @@ extern "C" SlangWasmModule slang_wasm_session_load_module(
 {
     try
     {
-        WasmSession* wasmSession = getHandle(g_sessions, sessionHandle);
+        WasmSession* wasmSession = getHandle(g_runtime.sessions, sessionHandle);
         SLANG_RELEASE_ASSERT(wasmSession);
         const ComPtr<slang::ISession> session = wasmSession->session;
 
@@ -900,7 +918,7 @@ extern "C" SlangWasmModule slang_wasm_session_load_module(
 
 extern "C" void slang_wasm_module_destroy(SlangWasmModule handle)
 {
-    delete takeHandle(g_modules, handle);
+    delete takeHandle(g_runtime.modules, handle);
 }
 
 // Returns 0 for an unknown handle (rather than trapping the instance): the
@@ -909,7 +927,7 @@ extern "C" void slang_wasm_module_destroy(SlangWasmModule handle)
 // ambiguous-but-harmless sentinel for "nothing to enumerate" either way.
 extern "C" uint32_t slang_wasm_module_entry_point_count(SlangWasmModule handle)
 {
-    WasmModule* wasmModule = getHandle(g_modules, handle);
+    WasmModule* wasmModule = getHandle(g_runtime.modules, handle);
     if (!wasmModule)
         return 0;
     return static_cast<uint32_t>(wasmModule->entryPointNames.getCount());
@@ -919,7 +937,7 @@ extern "C" uint32_t slang_wasm_module_entry_point_count(SlangWasmModule handle)
 // reason as slang_wasm_module_entry_point_count above.
 extern "C" uint32_t slang_wasm_module_entry_point_name_ptr(SlangWasmModule handle, uint32_t index)
 {
-    WasmModule* wasmModule = getHandle(g_modules, handle);
+    WasmModule* wasmModule = getHandle(g_runtime.modules, handle);
     if (!wasmModule || index >= static_cast<uint32_t>(wasmModule->entryPointNames.getCount()))
         return 0;
     return static_cast<uint32_t>(
@@ -930,7 +948,7 @@ extern "C" uint32_t slang_wasm_module_entry_point_name_ptr(SlangWasmModule handl
 // reason as slang_wasm_module_entry_point_count above.
 extern "C" uint32_t slang_wasm_module_entry_point_name_len(SlangWasmModule handle, uint32_t index)
 {
-    WasmModule* wasmModule = getHandle(g_modules, handle);
+    WasmModule* wasmModule = getHandle(g_runtime.modules, handle);
     if (!wasmModule || index >= static_cast<uint32_t>(wasmModule->entryPointNames.getCount()))
         return 0;
     return static_cast<uint32_t>(wasmModule->entryPointNames[index].getLength());
@@ -944,7 +962,7 @@ extern "C" SlangWasmResult slang_wasm_module_serialize(SlangWasmModule moduleHan
 
     try
     {
-        WasmModule* wasmModule = getHandle(g_modules, moduleHandle);
+        WasmModule* wasmModule = getHandle(g_runtime.modules, moduleHandle);
         SLANG_RELEASE_ASSERT(wasmModule);
         slang::IModule* module = wasmModule->module;
 
@@ -980,7 +998,7 @@ extern "C" SlangWasmModule slang_wasm_session_load_module_ir(
 {
     try
     {
-        WasmSession* wasmSession = getHandle(g_sessions, sessionHandle);
+        WasmSession* wasmSession = getHandle(g_runtime.sessions, sessionHandle);
         SLANG_RELEASE_ASSERT(wasmSession);
         const ComPtr<slang::ISession> session = wasmSession->session;
 
@@ -1019,7 +1037,7 @@ extern "C" SlangWasmModule slang_wasm_session_load_module_ir(
 extern "C" SlangWasmTypeConformances slang_wasm_type_conformances_create(
     SlangWasmModule moduleHandle)
 {
-    WasmModule* wasmModule = getHandle(g_modules, moduleHandle);
+    WasmModule* wasmModule = getHandle(g_runtime.modules, moduleHandle);
     if (!wasmModule)
         return 0;
 
@@ -1029,9 +1047,9 @@ extern "C" SlangWasmTypeConformances slang_wasm_type_conformances_create(
         conformances->session = wasmModule->session;
         conformances->module = wasmModule->module;
         return insertHandle(
-            g_typeConformancesLists,
+            g_runtime.typeConformancesLists,
             HandleKind::TypeConformances,
-            &g_nextTypeConformancesHandle,
+            &g_runtime.nextTypeConformancesHandle,
             conformances);
     }
     catch (...)
@@ -1050,7 +1068,8 @@ extern "C" int32_t slang_wasm_type_conformances_add(
     uint32_t* diagPtrOut,
     uint32_t* diagLenOut)
 {
-    WasmTypeConformances* wasmConformances = getHandle(g_typeConformancesLists, conformancesHandle);
+    WasmTypeConformances* wasmConformances =
+        getHandle(g_runtime.typeConformancesLists, conformancesHandle);
     SLANG_RELEASE_ASSERT(wasmConformances);
     try
     {
@@ -1125,7 +1144,7 @@ extern "C" int32_t slang_wasm_type_conformances_add(
 
 extern "C" void slang_wasm_type_conformances_destroy(SlangWasmTypeConformances handle)
 {
-    delete takeHandle(g_typeConformancesLists, handle);
+    delete takeHandle(g_runtime.typeConformancesLists, handle);
 }
 
 // ── Specialization ────────────────────────────────────────────────────────────
@@ -1135,9 +1154,9 @@ extern "C" SlangWasmSpecArgs slang_wasm_spec_args_create(void)
     try
     {
         return insertHandle(
-            g_specArgsLists,
+            g_runtime.specArgsLists,
             HandleKind::SpecArgs,
-            &g_nextSpecArgsHandle,
+            &g_runtime.nextSpecArgsHandle,
             new WasmSpecArgs());
     }
     catch (...)
@@ -1151,7 +1170,7 @@ extern "C" void slang_wasm_spec_args_add_type(
     const char* typeName,
     uint32_t typeNameLen)
 {
-    WasmSpecArgs* args = getHandle(g_specArgsLists, argsHandle);
+    WasmSpecArgs* args = getHandle(g_runtime.specArgsLists, argsHandle);
     SLANG_RELEASE_ASSERT(args);
     try
     {
@@ -1169,7 +1188,7 @@ extern "C" void slang_wasm_spec_args_add_expr(
     const char* expr,
     uint32_t exprLen)
 {
-    WasmSpecArgs* args = getHandle(g_specArgsLists, argsHandle);
+    WasmSpecArgs* args = getHandle(g_runtime.specArgsLists, argsHandle);
     SLANG_RELEASE_ASSERT(args);
     try
     {
@@ -1183,7 +1202,7 @@ extern "C" void slang_wasm_spec_args_add_expr(
 
 extern "C" void slang_wasm_spec_args_destroy(SlangWasmSpecArgs handle)
 {
-    delete takeHandle(g_specArgsLists, handle);
+    delete takeHandle(g_runtime.specArgsLists, handle);
 }
 
 extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
@@ -1199,11 +1218,11 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
         return 0;
 
     // Consumed exactly once, on every return path.
-    std::unique_ptr<WasmSpecArgs> specArgs(takeHandle(g_specArgsLists, specArgsHandle));
+    std::unique_ptr<WasmSpecArgs> specArgs(takeHandle(g_runtime.specArgsLists, specArgsHandle));
 
     try
     {
-        WasmModule* wasmModule = getHandle(g_modules, moduleHandle);
+        WasmModule* wasmModule = getHandle(g_runtime.modules, moduleHandle);
         SLANG_RELEASE_ASSERT(wasmModule);
         slang::ISession* session = wasmModule->session.get();
         slang::IModule* module = wasmModule->module;
@@ -1305,7 +1324,7 @@ extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModul
 
     try
     {
-        WasmModule* wasmModule = getHandle(g_modules, moduleHandle);
+        WasmModule* wasmModule = getHandle(g_runtime.modules, moduleHandle);
         SLANG_RELEASE_ASSERT(wasmModule);
         slang::IModule* module = wasmModule->module;
 
@@ -1340,7 +1359,7 @@ extern "C" SlangWasmResult slang_wasm_module_disassemble(SlangWasmModule moduleH
 
     try
     {
-        WasmModule* wasmModule = getHandle(g_modules, moduleHandle);
+        WasmModule* wasmModule = getHandle(g_runtime.modules, moduleHandle);
         SLANG_RELEASE_ASSERT(wasmModule);
         slang::IModule* module = wasmModule->module;
 
@@ -1382,7 +1401,7 @@ extern "C" SlangWasmResult slang_wasm_compile(
 
     try
     {
-        WasmSession* wasmSession = getHandle(g_sessions, sessionHandle);
+        WasmSession* wasmSession = getHandle(g_runtime.sessions, sessionHandle);
         SLANG_RELEASE_ASSERT(wasmSession);
         slang::ISession* session = wasmSession->session.get();
 
@@ -1441,7 +1460,7 @@ extern "C" SlangWasmResult slang_wasm_compile_entry_point(
 
     try
     {
-        WasmModule* wasmModule = getHandle(g_modules, moduleHandle);
+        WasmModule* wasmModule = getHandle(g_runtime.modules, moduleHandle);
         SLANG_RELEASE_ASSERT(wasmModule);
         slang::ISession* session = wasmModule->session.get();
         slang::IModule* module = wasmModule->module;
@@ -1484,7 +1503,7 @@ extern "C" SlangWasmResult slang_wasm_compile_module(
 
     try
     {
-        WasmModule* wasmModule = getHandle(g_modules, moduleHandle);
+        WasmModule* wasmModule = getHandle(g_runtime.modules, moduleHandle);
         SLANG_RELEASE_ASSERT(wasmModule);
         slang::ISession* session = wasmModule->session.get();
 
@@ -1520,7 +1539,7 @@ extern "C" SlangWasmResult slang_wasm_compile_module(
 // module for every other in-flight caller.
 extern "C" int32_t slang_wasm_result_succeeded(SlangWasmResult handle)
 {
-    WasmResult* result = getHandle(g_results, handle);
+    WasmResult* result = getHandle(g_runtime.results, handle);
     if (!result)
         return 0;
     return result->succeeded ? 1 : 0;
@@ -1528,7 +1547,7 @@ extern "C" int32_t slang_wasm_result_succeeded(SlangWasmResult handle)
 
 extern "C" uint32_t slang_wasm_result_code_ptr(SlangWasmResult handle)
 {
-    WasmResult* result = getHandle(g_results, handle);
+    WasmResult* result = getHandle(g_runtime.results, handle);
     if (!result)
         return 0;
     return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(result->code.getBuffer()));
@@ -1536,7 +1555,7 @@ extern "C" uint32_t slang_wasm_result_code_ptr(SlangWasmResult handle)
 
 extern "C" uint32_t slang_wasm_result_code_len(SlangWasmResult handle)
 {
-    WasmResult* result = getHandle(g_results, handle);
+    WasmResult* result = getHandle(g_runtime.results, handle);
     if (!result)
         return 0;
     return static_cast<uint32_t>(result->code.getCount());
@@ -1544,7 +1563,7 @@ extern "C" uint32_t slang_wasm_result_code_len(SlangWasmResult handle)
 
 extern "C" uint32_t slang_wasm_result_reflection_json_ptr(SlangWasmResult handle)
 {
-    WasmResult* result = getHandle(g_results, handle);
+    WasmResult* result = getHandle(g_runtime.results, handle);
     if (!result)
         return 0;
     return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(result->reflectionJson.getBuffer()));
@@ -1552,7 +1571,7 @@ extern "C" uint32_t slang_wasm_result_reflection_json_ptr(SlangWasmResult handle
 
 extern "C" uint32_t slang_wasm_result_reflection_json_len(SlangWasmResult handle)
 {
-    WasmResult* result = getHandle(g_results, handle);
+    WasmResult* result = getHandle(g_runtime.results, handle);
     if (!result)
         return 0;
     return static_cast<uint32_t>(result->reflectionJson.getLength());
@@ -1560,7 +1579,7 @@ extern "C" uint32_t slang_wasm_result_reflection_json_len(SlangWasmResult handle
 
 extern "C" uint32_t slang_wasm_result_diagnostics_ptr(SlangWasmResult handle)
 {
-    WasmResult* result = getHandle(g_results, handle);
+    WasmResult* result = getHandle(g_runtime.results, handle);
     if (!result)
         return 0;
     return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(result->diagnostics.getBuffer()));
@@ -1568,7 +1587,7 @@ extern "C" uint32_t slang_wasm_result_diagnostics_ptr(SlangWasmResult handle)
 
 extern "C" uint32_t slang_wasm_result_diagnostics_len(SlangWasmResult handle)
 {
-    WasmResult* result = getHandle(g_results, handle);
+    WasmResult* result = getHandle(g_runtime.results, handle);
     if (!result)
         return 0;
     return static_cast<uint32_t>(result->diagnostics.getLength());
@@ -1576,7 +1595,7 @@ extern "C" uint32_t slang_wasm_result_diagnostics_len(SlangWasmResult handle)
 
 extern "C" void slang_wasm_result_destroy(SlangWasmResult handle)
 {
-    delete takeHandle(g_results, handle);
+    delete takeHandle(g_runtime.results, handle);
 }
 
 // ── Version ───────────────────────────────────────────────────────────────────
@@ -1585,5 +1604,5 @@ extern "C" const char* slang_wasm_version(void)
 {
     if (!ensureGlobalSession())
         return "unknown";
-    return g_globalSession->getBuildTagString();
+    return g_runtime.globalSession->getBuildTagString();
 }
