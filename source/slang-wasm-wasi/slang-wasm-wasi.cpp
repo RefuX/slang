@@ -30,9 +30,9 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
-#include <vector>
 
 using Slang::ComPtr;
+using Slang::List;
 
 // ── Internal types ────────────────────────────────────────────────────────────
 
@@ -46,20 +46,20 @@ struct WasmSession
 // session being built), so the builder owns no string state past add-time.
 struct WasmTargetList
 {
-    std::vector<slang::TargetDesc> targets;
+    List<slang::TargetDesc> targets;
 };
 
 // Builder for a slang::PreprocessorMacroDesc list. Owns the name/value strings
 // so the PreprocessorMacroDesc::name/value pointers (built lazily) stay valid.
 struct WasmMacroList
 {
-    std::vector<std::pair<std::string, std::string>> entries;
+    List<std::pair<std::string, std::string>> entries;
 };
 
 // Builder for a search-path list. Owns the path strings for the same reason.
 struct WasmPathList
 {
-    std::vector<std::string> paths;
+    List<std::string> paths;
 };
 
 // One session-wide compiler option entry. Wraps slang::CompilerOptionEntry
@@ -78,13 +78,13 @@ struct WasmOptionEntry
 // Builder for a slang::CompilerOptionEntry list.
 struct WasmOptions
 {
-    std::vector<WasmOptionEntry> entries;
+    List<WasmOptionEntry> entries;
 };
 
 struct WasmResult
 {
     bool succeeded = false;
-    std::vector<uint8_t> code;
+    List<uint8_t> code;
     std::string reflectionJson;
     std::string diagnostics;
 };
@@ -102,7 +102,7 @@ struct WasmSpecArgEntry
 // Builder for a slang::SpecializationArg list.
 struct WasmSpecArgs
 {
-    std::vector<WasmSpecArgEntry> entries;
+    List<WasmSpecArgEntry> entries;
 };
 
 // A module parsed once via slang_wasm_session_load_module, kept alive across
@@ -113,8 +113,8 @@ struct WasmModule
 {
     ComPtr<slang::ISession> session;
     slang::IModule* module = nullptr; // owned by `session`'s module cache, not by us
-    std::vector<ComPtr<slang::IEntryPoint>> entryPoints;
-    std::vector<std::string> entryPointNames;
+    List<ComPtr<slang::IEntryPoint>> entryPoints;
+    List<std::string> entryPointNames;
 };
 
 // A list of type conformances, resolved eagerly against the owning module's
@@ -123,7 +123,7 @@ struct WasmTypeConformances
 {
     ComPtr<slang::ISession> session;
     slang::IModule* module = nullptr; // owned by `session`'s module cache, not by us
-    std::vector<ComPtr<slang::ITypeConformance>> conformances;
+    List<ComPtr<slang::ITypeConformance>> conformances;
 };
 
 // ── Global state ──────────────────────────────────────────────────────────────
@@ -394,7 +394,7 @@ static void linkAndGetCode(
         return;
 
     const auto* codePtr = static_cast<const uint8_t*>(codeBlob->getBufferPointer());
-    result->code.assign(codePtr, codePtr + codeBlob->getBufferSize());
+    result->code.addRange(codePtr, static_cast<Slang::Index>(codeBlob->getBufferSize()));
 
     // Serialize reflection to JSON.
     diagBlob = nullptr;
@@ -451,13 +451,13 @@ static void linkCompileAndReflect(
 // A 0/unknown handle appends nothing.
 static void appendTypeConformances(
     SlangWasmTypeConformances typeConformancesHandle,
-    std::vector<slang::IComponentType*>& components)
+    List<slang::IComponentType*>& components)
 {
     const auto it = g_typeConformancesLists.find(typeConformancesHandle);
     if (it == g_typeConformancesLists.end())
         return;
     for (auto& conformance : it->second->conformances)
-        components.push_back(conformance.get());
+        components.add(conformance.get());
 }
 
 // ── Memory helpers ────────────────────────────────────────────────────────────
@@ -538,7 +538,7 @@ extern "C" void slang_wasm_target_list_add(
             const std::string profileStr(profile, profileLen);
             target.profile = spFindProfile(g_globalSession, profileStr.c_str());
         }
-        it->second->targets.push_back(target);
+        it->second->targets.add(target);
     }
     catch (...)
     {
@@ -573,7 +573,7 @@ extern "C" void slang_wasm_macro_list_add(
     SLANG_RELEASE_ASSERT(it != g_macroLists.end());
     try
     {
-        it->second->entries.emplace_back(toStr(name, nameLen), toStr(value, valueLen));
+        it->second->entries.add({toStr(name, nameLen), toStr(value, valueLen)});
     }
     catch (...)
     {
@@ -606,7 +606,7 @@ extern "C" void slang_wasm_path_list_add(
     SLANG_RELEASE_ASSERT(it != g_pathLists.end());
     try
     {
-        it->second->paths.push_back(toStr(path, pathLen));
+        it->second->paths.add(toStr(path, pathLen));
     }
     catch (...)
     {
@@ -644,7 +644,7 @@ extern "C" void slang_wasm_options_add_string(
         entry.entry.name = static_cast<slang::CompilerOptionName>(name);
         entry.entry.value.kind = slang::CompilerOptionValueKind::String;
         entry.stringValue = toStr(val, valLen);
-        it->second->entries.push_back(std::move(entry));
+        it->second->entries.add(std::move(entry));
     }
     catch (...)
     {
@@ -661,7 +661,7 @@ extern "C" void slang_wasm_options_add_int(SlangWasmOptions optsHandle, uint32_t
         entry.entry.name = static_cast<slang::CompilerOptionName>(name);
         entry.entry.value.kind = slang::CompilerOptionValueKind::Int;
         entry.entry.value.intValue0 = val;
-        it->second->entries.push_back(std::move(entry));
+        it->second->entries.add(std::move(entry));
     }
     catch (...)
     {
@@ -692,55 +692,55 @@ extern "C" SlangWasmSession slang_wasm_session_create2(
     {
         if (!ensureGlobalSession())
             return 0;
-        if (!targets || targets->targets.empty())
+        if (!targets || targets->targets.getCount() == 0)
             return 0; // SessionDesc requires at least one target.
 
-        std::vector<slang::PreprocessorMacroDesc> macroDescs;
+        List<slang::PreprocessorMacroDesc> macroDescs;
         if (macros)
         {
-            macroDescs.reserve(macros->entries.size());
+            macroDescs.reserve(macros->entries.getCount());
             for (auto& kv : macros->entries)
-                macroDescs.push_back({.name = kv.first.c_str(), .value = kv.second.c_str()});
+                macroDescs.add({.name = kv.first.c_str(), .value = kv.second.c_str()});
         }
 
-        std::vector<const char*> pathPtrs;
+        List<const char*> pathPtrs;
         if (paths)
         {
-            pathPtrs.reserve(paths->paths.size());
+            pathPtrs.reserve(paths->paths.getCount());
             for (auto& p : paths->paths)
-                pathPtrs.push_back(p.c_str());
+                pathPtrs.add(p.c_str());
         }
 
-        std::vector<slang::CompilerOptionEntry> optionEntries;
+        List<slang::CompilerOptionEntry> optionEntries;
         if (options)
         {
-            optionEntries.reserve(options->entries.size());
+            optionEntries.reserve(options->entries.getCount());
             for (auto& e : options->entries)
             {
                 slang::CompilerOptionEntry entry = e.entry;
                 if (entry.value.kind == slang::CompilerOptionValueKind::String)
                     entry.value.stringValue0 = e.stringValue.c_str();
-                optionEntries.push_back(entry);
+                optionEntries.add(entry);
             }
         }
 
         slang::SessionDesc sessionDesc = {};
-        sessionDesc.targets = targets->targets.data();
-        sessionDesc.targetCount = static_cast<SlangInt>(targets->targets.size());
-        if (!macroDescs.empty())
+        sessionDesc.targets = targets->targets.getBuffer();
+        sessionDesc.targetCount = static_cast<SlangInt>(targets->targets.getCount());
+        if (macroDescs.getCount() > 0)
         {
-            sessionDesc.preprocessorMacros = macroDescs.data();
-            sessionDesc.preprocessorMacroCount = static_cast<SlangInt>(macroDescs.size());
+            sessionDesc.preprocessorMacros = macroDescs.getBuffer();
+            sessionDesc.preprocessorMacroCount = static_cast<SlangInt>(macroDescs.getCount());
         }
-        if (!pathPtrs.empty())
+        if (pathPtrs.getCount() > 0)
         {
-            sessionDesc.searchPaths = pathPtrs.data();
-            sessionDesc.searchPathCount = static_cast<SlangInt>(pathPtrs.size());
+            sessionDesc.searchPaths = pathPtrs.getBuffer();
+            sessionDesc.searchPathCount = static_cast<SlangInt>(pathPtrs.getCount());
         }
-        if (!optionEntries.empty())
+        if (optionEntries.getCount() > 0)
         {
-            sessionDesc.compilerOptionEntries = optionEntries.data();
-            sessionDesc.compilerOptionEntryCount = static_cast<uint32_t>(optionEntries.size());
+            sessionDesc.compilerOptionEntries = optionEntries.getBuffer();
+            sessionDesc.compilerOptionEntryCount = static_cast<uint32_t>(optionEntries.getCount());
         }
 
         ComPtr<slang::ISession> session;
@@ -792,8 +792,8 @@ static SlangWasmModule makeWasmModule(ComPtr<slang::ISession> session, slang::IM
         {
             slang::FunctionReflection* funcReflection = entryPoint->getFunctionReflection();
             const char* name = funcReflection ? funcReflection->getName() : nullptr;
-            wasmModule->entryPointNames.emplace_back(name ? name : "");
-            wasmModule->entryPoints.push_back(std::move(entryPoint));
+            wasmModule->entryPointNames.add(name ? name : "");
+            wasmModule->entryPoints.add(std::move(entryPoint));
         }
     }
 
@@ -851,7 +851,7 @@ extern "C" uint32_t slang_wasm_module_entry_point_count(SlangWasmModule handle)
     const auto it = g_modules.find(handle);
     if (it == g_modules.end())
         return 0;
-    return static_cast<uint32_t>(it->second->entryPointNames.size());
+    return static_cast<uint32_t>(it->second->entryPointNames.getCount());
 }
 
 // Returns 0 for an unknown handle or an out-of-range index, for the same
@@ -859,7 +859,8 @@ extern "C" uint32_t slang_wasm_module_entry_point_count(SlangWasmModule handle)
 extern "C" uint32_t slang_wasm_module_entry_point_name_ptr(SlangWasmModule handle, uint32_t index)
 {
     const auto it = g_modules.find(handle);
-    if (it == g_modules.end() || index >= it->second->entryPointNames.size())
+    if (it == g_modules.end() ||
+        index >= static_cast<uint32_t>(it->second->entryPointNames.getCount()))
         return 0;
     return static_cast<uint32_t>(
         reinterpret_cast<uintptr_t>(it->second->entryPointNames[index].data()));
@@ -870,7 +871,8 @@ extern "C" uint32_t slang_wasm_module_entry_point_name_ptr(SlangWasmModule handl
 extern "C" uint32_t slang_wasm_module_entry_point_name_len(SlangWasmModule handle, uint32_t index)
 {
     const auto it = g_modules.find(handle);
-    if (it == g_modules.end() || index >= it->second->entryPointNames.size())
+    if (it == g_modules.end() ||
+        index >= static_cast<uint32_t>(it->second->entryPointNames.getCount()))
         return 0;
     return static_cast<uint32_t>(it->second->entryPointNames[index].size());
 }
@@ -896,7 +898,7 @@ extern "C" SlangWasmResult slang_wasm_module_serialize(SlangWasmModule moduleHan
         }
 
         const auto* irPtr = static_cast<const uint8_t*>(irBlob->getBufferPointer());
-        result->code.assign(irPtr, irPtr + irBlob->getBufferSize());
+        result->code.addRange(irPtr, static_cast<Slang::Index>(irBlob->getBufferSize()));
         result->succeeded = true;
         return resultHandle;
     }
@@ -1046,7 +1048,7 @@ extern "C" int32_t slang_wasm_type_conformances_add(
             return -1;
         }
 
-        wasmConformances->conformances.push_back(std::move(conformance));
+        wasmConformances->conformances.add(std::move(conformance));
         writeDiagOutString(diagnostics, diagPtrOut, diagLenOut);
         return static_cast<int32_t>(assignedId);
     }
@@ -1085,7 +1087,7 @@ extern "C" void slang_wasm_spec_args_add_type(
     SLANG_RELEASE_ASSERT(it != g_specArgsLists.end());
     try
     {
-        it->second->entries.push_back(
+        it->second->entries.add(
             {.kind = slang::SpecializationArg::Kind::Type,
              .value = toStr(typeName, typeNameLen)});
     }
@@ -1103,7 +1105,7 @@ extern "C" void slang_wasm_spec_args_add_expr(
     SLANG_RELEASE_ASSERT(it != g_specArgsLists.end());
     try
     {
-        it->second->entries.push_back(
+        it->second->entries.add(
             {.kind = slang::SpecializationArg::Kind::Expr, .value = toStr(expr, exprLen)});
     }
     catch (...)
@@ -1144,13 +1146,13 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
         if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
-        std::vector<slang::IComponentType*> components = {module, entryPoint.get()};
+        List<slang::IComponentType*> components(module, entryPoint.get());
         appendTypeConformances(typeConformances, components);
         ComPtr<slang::IComponentType> composite;
         ComPtr<slang::IBlob> diagBlob;
         r = session->createCompositeComponentType(
-            components.data(),
-            static_cast<SlangInt>(components.size()),
+            components.getBuffer(),
+            static_cast<SlangInt>(components.getCount()),
             composite.writeRef(),
             diagBlob.writeRef());
         appendBlob(result->diagnostics, diagBlob);
@@ -1176,10 +1178,10 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
             appendBlob(result->diagnostics, diagBlob);
         }
 
-        std::vector<slang::SpecializationArg> args;
+        List<slang::SpecializationArg> args;
         if (specArgs)
         {
-            args.reserve(specArgs->entries.size());
+            args.reserve(specArgs->entries.getCount());
             for (auto& entry : specArgs->entries)
             {
                 if (entry.kind == slang::SpecializationArg::Kind::Type)
@@ -1192,11 +1194,11 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
                             "\n[slang-wasm-wasi] specialization type not found: " + entry.value;
                         return resultHandle;
                     }
-                    args.push_back(slang::SpecializationArg::fromType(type));
+                    args.add(slang::SpecializationArg::fromType(type));
                 }
                 else
                 {
-                    args.push_back(slang::SpecializationArg::fromExpr(entry.value.c_str()));
+                    args.add(slang::SpecializationArg::fromExpr(entry.value.c_str()));
                 }
             }
         }
@@ -1204,8 +1206,8 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
         ComPtr<slang::IComponentType> specialized;
         diagBlob = nullptr;
         r = composite->specialize(
-            args.data(),
-            static_cast<SlangInt>(args.size()),
+            args.getBuffer(),
+            static_cast<SlangInt>(args.getCount()),
             specialized.writeRef(),
             diagBlob.writeRef());
         appendBlob(result->diagnostics, diagBlob);
@@ -1376,12 +1378,12 @@ extern "C" SlangWasmResult slang_wasm_compile_entry_point(
         if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
-        std::vector<slang::IComponentType*> components = {module, entryPoint.get()};
+        List<slang::IComponentType*> components(module, entryPoint.get());
         appendTypeConformances(typeConformances, components);
         linkCompileAndReflect(
             session,
-            components.data(),
-            static_cast<SlangInt>(components.size()),
+            components.getBuffer(),
+            static_cast<SlangInt>(components.getCount()),
             targetIndex,
             false,
             result);
@@ -1411,16 +1413,16 @@ extern "C" SlangWasmResult slang_wasm_compile_module(
         WasmModule* wasmModule = moduleIt->second;
         slang::ISession* session = wasmModule->session.get();
 
-        std::vector<slang::IComponentType*> components;
-        components.push_back(wasmModule->module);
+        List<slang::IComponentType*> components;
+        components.add(wasmModule->module);
         for (auto& ep : wasmModule->entryPoints)
-            components.push_back(ep.get());
+            components.add(ep.get());
         appendTypeConformances(typeConformances, components);
 
         linkCompileAndReflect(
             session,
-            components.data(),
-            static_cast<SlangInt>(components.size()),
+            components.getBuffer(),
+            static_cast<SlangInt>(components.getCount()),
             targetIndex,
             true,
             result);
@@ -1454,7 +1456,7 @@ extern "C" uint32_t slang_wasm_result_code_ptr(SlangWasmResult handle)
     const auto it = g_results.find(handle);
     if (it == g_results.end())
         return 0;
-    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->code.data()));
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->code.getBuffer()));
 }
 
 extern "C" uint32_t slang_wasm_result_code_len(SlangWasmResult handle)
@@ -1462,7 +1464,7 @@ extern "C" uint32_t slang_wasm_result_code_len(SlangWasmResult handle)
     const auto it = g_results.find(handle);
     if (it == g_results.end())
         return 0;
-    return static_cast<uint32_t>(it->second->code.size());
+    return static_cast<uint32_t>(it->second->code.getCount());
 }
 
 extern "C" uint32_t slang_wasm_result_reflection_json_ptr(SlangWasmResult handle)
