@@ -2,7 +2,7 @@
 """
 generate-slang-bindings.py
 Reads include/slang.h and emits the C++ enum-metadata translation unit:
-  source/slang-wasm-wasi/slang-wasm-wasi-enum-metadata.cpp
+  source/slang-wasm-wasi/slang-wasm-wasi-enum-generated.cpp
      A C++ translation unit containing a static JSON blob of all Slang enum values,
      exported from the WASM module via slang_wasm_enum_metadata_ptr/len. Dynamic
      runtimes (Go, Python, Rust) call these two exports at startup to resolve enum
@@ -467,7 +467,7 @@ _GENERATED_HEADER = (
 
 
 def generate_cpp(enum_data: dict) -> str:
-    """Emit slang-wasm-wasi-enum-metadata.cpp.
+    """Emit slang-wasm-wasi-enum-generated.cpp.
 
     The file exports two C functions from the WASM module:
       slang_wasm_enum_metadata_ptr() → pointer to the JSON blob in linear memory
@@ -584,7 +584,7 @@ def main():
         "--cpp-out",
         default=os.path.join(
             repo_root,
-            "source", "slang-wasm-wasi", "slang-wasm-wasi-enum-metadata.cpp",
+            "source", "slang-wasm-wasi", "slang-wasm-wasi-enum-generated.cpp",
         ),
         help="Output path for the C++ metadata translation unit",
     )

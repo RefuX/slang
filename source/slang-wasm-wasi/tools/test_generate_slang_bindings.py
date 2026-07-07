@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Tests for generate-slang-bindings.py — the enum-metadata generator that
-backs slang-wasm-wasi-enum-metadata.cpp.
+backs slang-wasm-wasi-enum-generated.cpp.
 
 The generator parses include/slang.h with regexes rather than a real C++
 parser, and silently skips (via a stderr WARNING, not a build failure) any

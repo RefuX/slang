@@ -62,7 +62,7 @@ is newer than the generated file, or the generated file doesn't exist at all yet
 
 | Output                              | Purpose                                                                                                                                                                                                                                  |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `slang-wasm-wasi-enum-metadata.cpp` | C++ static JSON blob baked into the WASM module, exported via `slang_wasm_enum_metadata_ptr/len`. Dynamic-language runtimes (Go, Python, Rust) call these two exports at startup to resolve enum integer values without hardcoding them. |
+| `slang-wasm-wasi-enum-generated.cpp` | C++ static JSON blob baked into the WASM module, exported via `slang_wasm_enum_metadata_ptr/len`. Dynamic-language runtimes (Go, Python, Rust) call these two exports at startup to resolve enum integer values without hardcoding them. |
 
 Options:
 
@@ -71,7 +71,7 @@ Options:
 | `--java-out DIR`     | unset                                                      | Output directory for generated Java enum source files. Omit to skip Java generation. |
 | `--java-package PKG` | `org.shaderslang.wasm.enums`                               | Java package declared in each generated enum source file.                            |
 | `--slang-h PATH`     | `include/slang.h`                                          | Input Slang public header to parse for enum values.                                  |
-| `--cpp-out PATH`     | `source/slang-wasm-wasi/slang-wasm-wasi-enum-metadata.cpp` | Output path for the C++ enum metadata translation unit.                              |
+| `--cpp-out PATH`     | `source/slang-wasm-wasi/slang-wasm-wasi-enum-generated.cpp` | Output path for the C++ enum metadata translation unit.                              |
 
 ### Consuming the enum metadata at runtime
 

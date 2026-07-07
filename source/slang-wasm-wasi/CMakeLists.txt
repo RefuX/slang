@@ -20,7 +20,7 @@ set(_generator_script
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate-slang-bindings.py"
 )
 set(_enum_meta_cpp
-    "${CMAKE_CURRENT_SOURCE_DIR}/slang-wasm-wasi-enum-metadata.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/slang-wasm-wasi-enum-generated.cpp"
 )
 
 # `cmake --build` reruns the generator whenever slang.h or the
@@ -43,7 +43,7 @@ set(WASI_EH_LIB_DIR "${CMAKE_SYSROOT}/lib/wasm32-wasip1/eh")
 add_executable(
     slang-wasm-wasi
     slang-wasm-wasi.cpp
-    slang-wasm-wasi-enum-metadata.cpp
+    slang-wasm-wasi-enum-generated.cpp
 )
 
 set_target_properties(
