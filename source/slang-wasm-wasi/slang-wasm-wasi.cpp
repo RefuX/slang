@@ -62,15 +62,16 @@ struct WasmPathList
     std::vector<std::string> paths;
 };
 
-// One session-wide compiler option entry, stored in raw form so the
-// CompilerOptionEntry/CompilerOptionValue actually handed to Slang is built
-// only once, at session_create2 time, after the builder is fully populated and
-// its backing strings are no longer subject to reallocation.
+// One session-wide compiler option entry. Wraps slang::CompilerOptionEntry
+// directly rather than re-deriving its shape, but keeps the string payload in
+// an owned `stringValue` alongside it: CompilerOptionValue::stringValue0 is a
+// non-owning `const char*`, so `entry.value.stringValue0` is left null here
+// and only pointed at `stringValue.c_str()` in session_create2, once the
+// builder is fully populated and its backing strings are no longer subject to
+// reallocation.
 struct WasmOptionEntry
 {
-    slang::CompilerOptionName name;
-    bool isString;
-    int32_t intValue = 0;
+    slang::CompilerOptionEntry entry;
     std::string stringValue;
 };
 
@@ -94,7 +95,7 @@ struct WasmResult
 // known — to resolve into a TypeReflection*).
 struct WasmSpecArgEntry
 {
-    bool isType; // true: `value` is a type name; false: `value` is an expression.
+    slang::SpecializationArg::Kind kind; // Type: `value` is a type name; Expr: `value` is an expression.
     std::string value;
 };
 
@@ -640,8 +641,8 @@ extern "C" void slang_wasm_options_add_string(
     try
     {
         WasmOptionEntry entry;
-        entry.name = static_cast<slang::CompilerOptionName>(name);
-        entry.isString = true;
+        entry.entry.name = static_cast<slang::CompilerOptionName>(name);
+        entry.entry.value.kind = slang::CompilerOptionValueKind::String;
         entry.stringValue = toStr(val, valLen);
         it->second->entries.push_back(std::move(entry));
     }
@@ -657,9 +658,9 @@ extern "C" void slang_wasm_options_add_int(SlangWasmOptions optsHandle, uint32_t
     try
     {
         WasmOptionEntry entry;
-        entry.name = static_cast<slang::CompilerOptionName>(name);
-        entry.isString = false;
-        entry.intValue = val;
+        entry.entry.name = static_cast<slang::CompilerOptionName>(name);
+        entry.entry.value.kind = slang::CompilerOptionValueKind::Int;
+        entry.entry.value.intValue0 = val;
         it->second->entries.push_back(std::move(entry));
     }
     catch (...)
@@ -716,18 +717,9 @@ extern "C" SlangWasmSession slang_wasm_session_create2(
             optionEntries.reserve(options->entries.size());
             for (auto& e : options->entries)
             {
-                slang::CompilerOptionEntry entry = {};
-                entry.name = e.name;
-                if (e.isString)
-                {
-                    entry.value.kind = slang::CompilerOptionValueKind::String;
+                slang::CompilerOptionEntry entry = e.entry;
+                if (entry.value.kind == slang::CompilerOptionValueKind::String)
                     entry.value.stringValue0 = e.stringValue.c_str();
-                }
-                else
-                {
-                    entry.value.kind = slang::CompilerOptionValueKind::Int;
-                    entry.value.intValue0 = e.intValue;
-                }
                 optionEntries.push_back(entry);
             }
         }
@@ -1093,7 +1085,9 @@ extern "C" void slang_wasm_spec_args_add_type(
     SLANG_RELEASE_ASSERT(it != g_specArgsLists.end());
     try
     {
-        it->second->entries.push_back({.isType = true, .value = toStr(typeName, typeNameLen)});
+        it->second->entries.push_back(
+            {.kind = slang::SpecializationArg::Kind::Type,
+             .value = toStr(typeName, typeNameLen)});
     }
     catch (...)
     {
@@ -1109,7 +1103,8 @@ extern "C" void slang_wasm_spec_args_add_expr(
     SLANG_RELEASE_ASSERT(it != g_specArgsLists.end());
     try
     {
-        it->second->entries.push_back({.isType = false, .value = toStr(expr, exprLen)});
+        it->second->entries.push_back(
+            {.kind = slang::SpecializationArg::Kind::Expr, .value = toStr(expr, exprLen)});
     }
     catch (...)
     {
@@ -1172,7 +1167,7 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
         if (specArgs)
         {
             for (auto& entry : specArgs->entries)
-                needsLayout |= entry.isType;
+                needsLayout |= (entry.kind == slang::SpecializationArg::Kind::Type);
         }
         if (needsLayout)
         {
@@ -1187,7 +1182,7 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
             args.reserve(specArgs->entries.size());
             for (auto& entry : specArgs->entries)
             {
-                if (entry.isType)
+                if (entry.kind == slang::SpecializationArg::Kind::Type)
                 {
                     slang::TypeReflection* type =
                         layout ? layout->findTypeByName(entry.value.c_str()) : nullptr;
