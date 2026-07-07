@@ -27,12 +27,13 @@
 #include <slang.h>
 #include <stdlib.h>
 #include <string.h>
-#include <string>
 #include <unordered_map>
 #include <utility>
 
 using Slang::ComPtr;
 using Slang::List;
+using Slang::String;
+using Slang::StringBuilder;
 
 // ── Internal types ────────────────────────────────────────────────────────────
 
@@ -53,26 +54,26 @@ struct WasmTargetList
 // so the PreprocessorMacroDesc::name/value pointers (built lazily) stay valid.
 struct WasmMacroList
 {
-    List<std::pair<std::string, std::string>> entries;
+    List<std::pair<String, String>> entries;
 };
 
 // Builder for a search-path list. Owns the path strings for the same reason.
 struct WasmPathList
 {
-    List<std::string> paths;
+    List<String> paths;
 };
 
 // One session-wide compiler option entry. Wraps slang::CompilerOptionEntry
 // directly rather than re-deriving its shape, but keeps the string payload in
 // an owned `stringValue` alongside it: CompilerOptionValue::stringValue0 is a
 // non-owning `const char*`, so `entry.value.stringValue0` is left null here
-// and only pointed at `stringValue.c_str()` in session_create2, once the
+// and only pointed at `stringValue.getBuffer()` in session_create2, once the
 // builder is fully populated and its backing strings are no longer subject to
 // reallocation.
 struct WasmOptionEntry
 {
     slang::CompilerOptionEntry entry;
-    std::string stringValue;
+    String stringValue;
 };
 
 // Builder for a slang::CompilerOptionEntry list.
@@ -85,8 +86,8 @@ struct WasmResult
 {
     bool succeeded = false;
     List<uint8_t> code;
-    std::string reflectionJson;
-    std::string diagnostics;
+    StringBuilder reflectionJson;
+    StringBuilder diagnostics;
 };
 
 // One specialization argument, stored in raw form (resolved to an actual
@@ -96,7 +97,7 @@ struct WasmResult
 struct WasmSpecArgEntry
 {
     slang::SpecializationArg::Kind kind; // Type: `value` is a type name; Expr: `value` is an expression.
-    std::string value;
+    String value;
 };
 
 // Builder for a slang::SpecializationArg list.
@@ -114,7 +115,7 @@ struct WasmModule
     ComPtr<slang::ISession> session;
     slang::IModule* module = nullptr; // owned by `session`'s module cache, not by us
     List<ComPtr<slang::IEntryPoint>> entryPoints;
-    List<std::string> entryPointNames;
+    List<String> entryPointNames;
 };
 
 // A list of type conformances, resolved eagerly against the owning module's
@@ -196,9 +197,9 @@ static std::pair<WasmResult*, uint32_t> makeWasmResult()
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// Convert a (ptr, len) argument pair from the host into a std::string,
+// Convert a (ptr, len) argument pair from the host into a Slang::String,
 // treating a null ptr as an empty string. Used at every (ptr, len) argument
-// site instead of calling std::string's (ptr, len) constructor directly:
+// site instead of calling String's (begin, end) constructor directly:
 // that constructor's contract requires a non-null ptr whenever len > 0, and
 // violating it is undefined behavior rather than a catchable exception, so
 // it would not be saved by any of this file's try/catch blocks. A null ptr
@@ -206,9 +207,9 @@ static std::pair<WasmResult*, uint32_t> makeWasmResult()
 // theoretical one — slang_wasm_alloc can return null on allocation failure,
 // and a caller could plausibly forward that null straight into one of these
 // arguments without checking it first.
-static std::string toStr(const char* ptr, uint32_t len)
+static String toStr(const char* ptr, uint32_t len)
 {
-    return ptr ? std::string(ptr, len) : std::string();
+    return ptr ? String(ptr, ptr + len) : String();
 }
 
 // Ensure the single shared IGlobalSession exists. Returns false on failure.
@@ -221,8 +222,8 @@ static bool ensureGlobalSession()
     return SLANG_SUCCEEDED(r);
 }
 
-// Append blob contents to a std::string, safely handling a null blob.
-static void appendBlob(std::string& out, slang::IBlob* blob)
+// Append blob contents to a StringBuilder, safely handling a null blob.
+static void appendBlob(StringBuilder& out, slang::IBlob* blob)
 {
     if (!blob || blob->getBufferSize() == 0)
         return;
@@ -305,7 +306,7 @@ static void emitDeclReflectionJson(slang::DeclReflection* decl, Slang::PrettyWri
 // The buffer is owned by the caller of the function that took these out-params;
 // free it with slang_wasm_free. Shared by writeDiagOut (a single slang::IBlob)
 // and writeDiagOutString (diagnostics accumulated from multiple sources into
-// one std::string).
+// one StringBuilder).
 static void writeDiagOutBytes(
     const void* data,
     size_t size,
@@ -348,13 +349,18 @@ static void writeDiagOut(slang::IBlob* blob, uint32_t* diagPtrOut, uint32_t* dia
 }
 
 // As writeDiagOut, but for diagnostics already accumulated (e.g. via
-// appendBlob) from more than one Slang call into a single std::string.
+// appendBlob) from more than one Slang call into a single StringBuilder.
+// Takes the String base so it accepts either a String or a StringBuilder.
 static void writeDiagOutString(
-    const std::string& diagnostics,
+    const String& diagnostics,
     uint32_t* diagPtrOut,
     uint32_t* diagLenOut)
 {
-    writeDiagOutBytes(diagnostics.data(), diagnostics.size(), diagPtrOut, diagLenOut);
+    writeDiagOutBytes(
+        diagnostics.getBuffer(),
+        static_cast<size_t>(diagnostics.getLength()),
+        diagPtrOut,
+        diagLenOut);
 }
 
 // Link `unlinked`, then produce code for the target at `targetIndex` plus
@@ -535,8 +541,8 @@ extern "C" void slang_wasm_target_list_add(
         target.flags = static_cast<SlangTargetFlags>(flags);
         if (profile && profileLen > 0 && g_globalSession)
         {
-            const std::string profileStr(profile, profileLen);
-            target.profile = spFindProfile(g_globalSession, profileStr.c_str());
+            const String profileStr(profile, profile + profileLen);
+            target.profile = spFindProfile(g_globalSession, profileStr.getBuffer());
         }
         it->second->targets.add(target);
     }
@@ -700,7 +706,7 @@ extern "C" SlangWasmSession slang_wasm_session_create2(
         {
             macroDescs.reserve(macros->entries.getCount());
             for (auto& kv : macros->entries)
-                macroDescs.add({.name = kv.first.c_str(), .value = kv.second.c_str()});
+                macroDescs.add({.name = kv.first.getBuffer(), .value = kv.second.getBuffer()});
         }
 
         List<const char*> pathPtrs;
@@ -708,7 +714,7 @@ extern "C" SlangWasmSession slang_wasm_session_create2(
         {
             pathPtrs.reserve(paths->paths.getCount());
             for (auto& p : paths->paths)
-                pathPtrs.add(p.c_str());
+                pathPtrs.add(p.getBuffer());
         }
 
         List<slang::CompilerOptionEntry> optionEntries;
@@ -719,7 +725,7 @@ extern "C" SlangWasmSession slang_wasm_session_create2(
             {
                 slang::CompilerOptionEntry entry = e.entry;
                 if (entry.value.kind == slang::CompilerOptionValueKind::String)
-                    entry.value.stringValue0 = e.stringValue.c_str();
+                    entry.value.stringValue0 = e.stringValue.getBuffer();
                 optionEntries.add(entry);
             }
         }
@@ -815,14 +821,14 @@ extern "C" SlangWasmModule slang_wasm_session_load_module(
         SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
         const ComPtr<slang::ISession> session = sessionIt->second->session;
 
-        const std::string nameStr = toStr(name, nameLen);
-        const std::string sourceStr = toStr(source, sourceLen);
+        const String nameStr = toStr(name, nameLen);
+        const String sourceStr = toStr(source, sourceLen);
 
         ComPtr<slang::IBlob> diagBlob;
         slang::IModule* module = session->loadModuleFromSourceString(
-            nameStr.c_str(),
-            nameStr.c_str(), // use module name as path
-            sourceStr.c_str(),
+            nameStr.getBuffer(),
+            nameStr.getBuffer(), // use module name as path
+            sourceStr.getBuffer(),
             diagBlob.writeRef());
         writeDiagOut(diagBlob, diagPtrOut, diagLenOut);
         if (!module)
@@ -863,7 +869,7 @@ extern "C" uint32_t slang_wasm_module_entry_point_name_ptr(SlangWasmModule handl
         index >= static_cast<uint32_t>(it->second->entryPointNames.getCount()))
         return 0;
     return static_cast<uint32_t>(
-        reinterpret_cast<uintptr_t>(it->second->entryPointNames[index].data()));
+        reinterpret_cast<uintptr_t>(it->second->entryPointNames[index].getBuffer()));
 }
 
 // Returns 0 for an unknown handle or an out-of-range index, for the same
@@ -874,7 +880,7 @@ extern "C" uint32_t slang_wasm_module_entry_point_name_len(SlangWasmModule handl
     if (it == g_modules.end() ||
         index >= static_cast<uint32_t>(it->second->entryPointNames.getCount()))
         return 0;
-    return static_cast<uint32_t>(it->second->entryPointNames[index].size());
+    return static_cast<uint32_t>(it->second->entryPointNames[index].getLength());
 }
 
 extern "C" SlangWasmResult slang_wasm_module_serialize(SlangWasmModule moduleHandle)
@@ -893,7 +899,7 @@ extern "C" SlangWasmResult slang_wasm_module_serialize(SlangWasmModule moduleHan
         const SlangResult r = module->serialize(irBlob.writeRef());
         if (SLANG_FAILED(r) || !irBlob)
         {
-            result->diagnostics = "[slang-wasm-wasi] IModule::serialize failed";
+            result->diagnostics << "[slang-wasm-wasi] IModule::serialize failed";
             return resultHandle;
         }
 
@@ -904,7 +910,7 @@ extern "C" SlangWasmResult slang_wasm_module_serialize(SlangWasmModule moduleHan
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
+        result->diagnostics << "\n[slang-wasm-wasi] internal exception caught; "
                                "module serialization aborted.";
         return resultHandle;
     }
@@ -925,7 +931,7 @@ extern "C" SlangWasmModule slang_wasm_session_load_module_ir(
         SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
         const ComPtr<slang::ISession> session = sessionIt->second->session;
 
-        const std::string nameStr = toStr(name, nameLen);
+        const String nameStr = toStr(name, nameLen);
         const ComPtr<slang::IBlob> sourceBlob = Slang::RawBlob::create(irBlob, irLen);
         if (!sourceBlob)
         {
@@ -938,8 +944,8 @@ extern "C" SlangWasmModule slang_wasm_session_load_module_ir(
 
         ComPtr<slang::IBlob> diagBlob;
         slang::IModule* module = session->loadModuleFromIRBlob(
-            nameStr.c_str(),
-            nameStr.c_str(), // use module name as path
+            nameStr.getBuffer(),
+            nameStr.getBuffer(), // use module name as path
             sourceBlob,
             diagBlob.writeRef());
         writeDiagOut(diagBlob, diagPtrOut, diagLenOut);
@@ -992,7 +998,7 @@ extern "C" int32_t slang_wasm_type_conformances_add(
     try
     {
         WasmTypeConformances* wasmConformances = it->second;
-        std::string diagnostics;
+        StringBuilder diagnostics;
 
         ComPtr<slang::IBlob> diagBlob;
         slang::ProgramLayout* layout = wasmConformances->module->getLayout(0, diagBlob.writeRef());
@@ -1003,20 +1009,22 @@ extern "C" int32_t slang_wasm_type_conformances_add(
             return -1;
         }
 
-        const std::string concreteTypeNameStr = toStr(concreteTypeName, concreteTypeNameLen);
-        const std::string interfaceTypeNameStr = toStr(interfaceTypeName, interfaceTypeNameLen);
-        slang::TypeReflection* concreteType = layout->findTypeByName(concreteTypeNameStr.c_str());
-        slang::TypeReflection* interfaceType = layout->findTypeByName(interfaceTypeNameStr.c_str());
+        const String concreteTypeNameStr = toStr(concreteTypeName, concreteTypeNameLen);
+        const String interfaceTypeNameStr = toStr(interfaceTypeName, interfaceTypeNameLen);
+        slang::TypeReflection* concreteType =
+            layout->findTypeByName(concreteTypeNameStr.getBuffer());
+        slang::TypeReflection* interfaceType =
+            layout->findTypeByName(interfaceTypeNameStr.getBuffer());
         if (!concreteType || !interfaceType)
         {
             // findTypeByName gives no diagnostic blob of its own, so synthesize
             // a message naming whichever lookup(s) failed.
             if (!concreteType)
-                diagnostics +=
-                    "error: type '" + concreteTypeNameStr + "' not found in module layout\n";
+                diagnostics << "error: type '" << concreteTypeNameStr
+                            << "' not found in module layout\n";
             if (!interfaceType)
-                diagnostics +=
-                    "error: type '" + interfaceTypeNameStr + "' not found in module layout\n";
+                diagnostics << "error: type '" << interfaceTypeNameStr
+                            << "' not found in module layout\n";
             writeDiagOutString(diagnostics, diagPtrOut, diagLenOut);
             return -1;
         }
@@ -1042,8 +1050,8 @@ extern "C" int32_t slang_wasm_type_conformances_add(
                 interfaceType,
                 &assignedId)))
         {
-            diagnostics += "error: failed to assign a dispatch ID to conformance of '" +
-                           concreteTypeNameStr + "' to '" + interfaceTypeNameStr + "'\n";
+            diagnostics << "error: failed to assign a dispatch ID to conformance of '"
+                        << concreteTypeNameStr << "' to '" << interfaceTypeNameStr << "'\n";
             writeDiagOutString(diagnostics, diagPtrOut, diagLenOut);
             return -1;
         }
@@ -1140,9 +1148,10 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
         slang::ISession* session = moduleIt->second->session.get();
         slang::IModule* module = moduleIt->second->module;
 
-        const std::string entryNameStr = toStr(entryName, entryNameLen);
+        const String entryNameStr = toStr(entryName, entryNameLen);
         ComPtr<slang::IEntryPoint> entryPoint;
-        SlangResult r = module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
+        SlangResult r =
+            module->findEntryPointByName(entryNameStr.getBuffer(), entryPoint.writeRef());
         if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
@@ -1187,18 +1196,19 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
                 if (entry.kind == slang::SpecializationArg::Kind::Type)
                 {
                     slang::TypeReflection* type =
-                        layout ? layout->findTypeByName(entry.value.c_str()) : nullptr;
+                        layout ? layout->findTypeByName(entry.value.getBuffer()) : nullptr;
                     if (!type)
                     {
-                        result->diagnostics +=
-                            "\n[slang-wasm-wasi] specialization type not found: " + entry.value;
+                        result->diagnostics
+                            << "\n[slang-wasm-wasi] specialization type not found: "
+                            << entry.value;
                         return resultHandle;
                     }
                     args.add(slang::SpecializationArg::fromType(type));
                 }
                 else
                 {
-                    args.add(slang::SpecializationArg::fromExpr(entry.value.c_str()));
+                    args.add(slang::SpecializationArg::fromExpr(entry.value.getBuffer()));
                 }
             }
         }
@@ -1219,7 +1229,7 @@ extern "C" SlangWasmResult slang_wasm_compile_specialized_entry_point(
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
+        result->diagnostics << "\n[slang-wasm-wasi] internal exception caught; "
                                "specialization aborted.";
         return resultHandle;
     }
@@ -1242,13 +1252,13 @@ extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModul
         slang::DeclReflection* decl = module->getModuleReflection();
         if (!decl)
         {
-            result->diagnostics = "[slang-wasm-wasi] IModule::getModuleReflection returned null";
+            result->diagnostics << "[slang-wasm-wasi] IModule::getModuleReflection returned null";
             return resultHandle;
         }
 
         Slang::PrettyWriter writer;
         emitDeclReflectionJson(decl, writer);
-        result->reflectionJson.assign(
+        result->reflectionJson.append(
             writer.getBuilder().getBuffer(),
             static_cast<size_t>(writer.getBuilder().getLength()));
         result->succeeded = true;
@@ -1256,7 +1266,7 @@ extern "C" SlangWasmResult slang_wasm_module_decl_reflection_json(SlangWasmModul
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
+        result->diagnostics << "\n[slang-wasm-wasi] internal exception caught; "
                                "decl reflection aborted.";
         return resultHandle;
     }
@@ -1278,7 +1288,7 @@ extern "C" SlangWasmResult slang_wasm_module_disassemble(SlangWasmModule moduleH
         const SlangResult r = module->disassemble(disasmBlob.writeRef());
         if (SLANG_FAILED(r) || !disasmBlob)
         {
-            result->diagnostics = "[slang-wasm-wasi] IModule::disassemble failed";
+            result->diagnostics << "[slang-wasm-wasi] IModule::disassemble failed";
             return resultHandle;
         }
 
@@ -1288,7 +1298,7 @@ extern "C" SlangWasmResult slang_wasm_module_disassemble(SlangWasmModule moduleH
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
+        result->diagnostics << "\n[slang-wasm-wasi] internal exception caught; "
                                "disassembly aborted.";
         return resultHandle;
     }
@@ -1316,16 +1326,16 @@ extern "C" SlangWasmResult slang_wasm_compile(
         SLANG_RELEASE_ASSERT(sessionIt != g_sessions.end());
         slang::ISession* session = sessionIt->second->session.get();
 
-        const std::string moduleNameStr = toStr(moduleName, moduleNameLen);
-        const std::string sourceStr = toStr(source, sourceLen);
-        const std::string entryNameStr = toStr(entryName, entryNameLen);
+        const String moduleNameStr = toStr(moduleName, moduleNameLen);
+        const String sourceStr = toStr(source, sourceLen);
+        const String entryNameStr = toStr(entryName, entryNameLen);
 
         // Step 1: load the module from the source string.
         ComPtr<slang::IBlob> diagBlob;
         slang::IModule* module = session->loadModuleFromSourceString(
-            moduleNameStr.c_str(),
-            moduleNameStr.c_str(), // use module name as path
-            sourceStr.c_str(),
+            moduleNameStr.getBuffer(),
+            moduleNameStr.getBuffer(), // use module name as path
+            sourceStr.getBuffer(),
             diagBlob.writeRef());
         appendBlob(result->diagnostics, diagBlob);
         if (!module)
@@ -1335,7 +1345,7 @@ extern "C" SlangWasmResult slang_wasm_compile(
         ComPtr<slang::IEntryPoint> entryPoint;
         diagBlob = nullptr;
         const SlangResult r =
-            module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
+            module->findEntryPointByName(entryNameStr.getBuffer(), entryPoint.writeRef());
         if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
@@ -1346,7 +1356,7 @@ extern "C" SlangWasmResult slang_wasm_compile(
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
+        result->diagnostics << "\n[slang-wasm-wasi] internal exception caught; "
                                "compilation aborted.";
         return resultHandle;
     }
@@ -1370,11 +1380,11 @@ extern "C" SlangWasmResult slang_wasm_compile_entry_point(
         slang::ISession* session = moduleIt->second->session.get();
         slang::IModule* module = moduleIt->second->module;
 
-        const std::string entryNameStr = toStr(entryName, entryNameLen);
+        const String entryNameStr = toStr(entryName, entryNameLen);
 
         ComPtr<slang::IEntryPoint> entryPoint;
         const SlangResult r =
-            module->findEntryPointByName(entryNameStr.c_str(), entryPoint.writeRef());
+            module->findEntryPointByName(entryNameStr.getBuffer(), entryPoint.writeRef());
         if (SLANG_FAILED(r) || !entryPoint)
             return resultHandle;
 
@@ -1391,7 +1401,7 @@ extern "C" SlangWasmResult slang_wasm_compile_entry_point(
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
+        result->diagnostics << "\n[slang-wasm-wasi] internal exception caught; "
                                "compilation aborted.";
         return resultHandle;
     }
@@ -1430,7 +1440,7 @@ extern "C" SlangWasmResult slang_wasm_compile_module(
     }
     catch (...)
     {
-        result->diagnostics += "\n[slang-wasm-wasi] internal exception caught; "
+        result->diagnostics << "\n[slang-wasm-wasi] internal exception caught; "
                                "compilation aborted.";
         return resultHandle;
     }
@@ -1472,7 +1482,7 @@ extern "C" uint32_t slang_wasm_result_reflection_json_ptr(SlangWasmResult handle
     const auto it = g_results.find(handle);
     if (it == g_results.end())
         return 0;
-    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->reflectionJson.data()));
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->reflectionJson.getBuffer()));
 }
 
 extern "C" uint32_t slang_wasm_result_reflection_json_len(SlangWasmResult handle)
@@ -1480,7 +1490,7 @@ extern "C" uint32_t slang_wasm_result_reflection_json_len(SlangWasmResult handle
     const auto it = g_results.find(handle);
     if (it == g_results.end())
         return 0;
-    return static_cast<uint32_t>(it->second->reflectionJson.size());
+    return static_cast<uint32_t>(it->second->reflectionJson.getLength());
 }
 
 extern "C" uint32_t slang_wasm_result_diagnostics_ptr(SlangWasmResult handle)
@@ -1488,7 +1498,7 @@ extern "C" uint32_t slang_wasm_result_diagnostics_ptr(SlangWasmResult handle)
     const auto it = g_results.find(handle);
     if (it == g_results.end())
         return 0;
-    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->diagnostics.data()));
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(it->second->diagnostics.getBuffer()));
 }
 
 extern "C" uint32_t slang_wasm_result_diagnostics_len(SlangWasmResult handle)
@@ -1496,7 +1506,7 @@ extern "C" uint32_t slang_wasm_result_diagnostics_len(SlangWasmResult handle)
     const auto it = g_results.find(handle);
     if (it == g_results.end())
         return 0;
-    return static_cast<uint32_t>(it->second->diagnostics.size());
+    return static_cast<uint32_t>(it->second->diagnostics.getLength());
 }
 
 extern "C" void slang_wasm_result_destroy(SlangWasmResult handle)
