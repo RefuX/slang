@@ -32,20 +32,6 @@
 #include <utility>
 #include <vector>
 
-// Traps on an out-of-contract handle in a builder mutator (target/macro/path/
-// options list _add, spec_args _add_*): the handle should come from the
-// matching _create call, so a stale/wrong one is a pure caller bug, not a
-// recoverable condition. Other entry points use SLANG_RELEASE_ASSERT +
-// try/catch, or return a 0/empty sentinel, instead of trapping.
-#define SLANG_WASM_ASSERT(cond) \
-    do                          \
-    {                           \
-        if (!(cond))            \
-        {                       \
-            __builtin_trap();   \
-        }                       \
-    } while (0)
-
 using Slang::ComPtr;
 
 // ── Internal types ────────────────────────────────────────────────────────────
@@ -535,7 +521,7 @@ extern "C" void slang_wasm_target_list_add(
     uint32_t flags)
 {
     const auto it = g_targetLists.find(listHandle);
-    SLANG_WASM_ASSERT(it != g_targetLists.end());
+    SLANG_RELEASE_ASSERT(it != g_targetLists.end());
 
     // ensureGlobalSession()/spFindProfile() can throw; catch it here (no result
     // object exists to report through) and just drop the target.
@@ -583,7 +569,7 @@ extern "C" void slang_wasm_macro_list_add(
     uint32_t valueLen)
 {
     const auto it = g_macroLists.find(listHandle);
-    SLANG_WASM_ASSERT(it != g_macroLists.end());
+    SLANG_RELEASE_ASSERT(it != g_macroLists.end());
     try
     {
         it->second->entries.emplace_back(toStr(name, nameLen), toStr(value, valueLen));
@@ -616,7 +602,7 @@ extern "C" void slang_wasm_path_list_add(
     uint32_t pathLen)
 {
     const auto it = g_pathLists.find(listHandle);
-    SLANG_WASM_ASSERT(it != g_pathLists.end());
+    SLANG_RELEASE_ASSERT(it != g_pathLists.end());
     try
     {
         it->second->paths.push_back(toStr(path, pathLen));
@@ -650,7 +636,7 @@ extern "C" void slang_wasm_options_add_string(
     uint32_t valLen)
 {
     const auto it = g_optionLists.find(optsHandle);
-    SLANG_WASM_ASSERT(it != g_optionLists.end());
+    SLANG_RELEASE_ASSERT(it != g_optionLists.end());
     try
     {
         WasmOptionEntry entry;
@@ -667,7 +653,7 @@ extern "C" void slang_wasm_options_add_string(
 extern "C" void slang_wasm_options_add_int(SlangWasmOptions optsHandle, uint32_t name, int32_t val)
 {
     const auto it = g_optionLists.find(optsHandle);
-    SLANG_WASM_ASSERT(it != g_optionLists.end());
+    SLANG_RELEASE_ASSERT(it != g_optionLists.end());
     try
     {
         WasmOptionEntry entry;
@@ -1008,7 +994,7 @@ extern "C" int32_t slang_wasm_type_conformances_add(
     uint32_t* diagLenOut)
 {
     const auto it = g_typeConformancesLists.find(conformancesHandle);
-    SLANG_WASM_ASSERT(it != g_typeConformancesLists.end());
+    SLANG_RELEASE_ASSERT(it != g_typeConformancesLists.end());
     try
     {
         WasmTypeConformances* wasmConformances = it->second;
@@ -1104,7 +1090,7 @@ extern "C" void slang_wasm_spec_args_add_type(
     uint32_t typeNameLen)
 {
     const auto it = g_specArgsLists.find(argsHandle);
-    SLANG_WASM_ASSERT(it != g_specArgsLists.end());
+    SLANG_RELEASE_ASSERT(it != g_specArgsLists.end());
     try
     {
         it->second->entries.push_back({.isType = true, .value = toStr(typeName, typeNameLen)});
@@ -1120,7 +1106,7 @@ extern "C" void slang_wasm_spec_args_add_expr(
     uint32_t exprLen)
 {
     const auto it = g_specArgsLists.find(argsHandle);
-    SLANG_WASM_ASSERT(it != g_specArgsLists.end());
+    SLANG_RELEASE_ASSERT(it != g_specArgsLists.end());
     try
     {
         it->second->entries.push_back({.isType = false, .value = toStr(expr, exprLen)});
