@@ -15,11 +15,11 @@
 
 #include "slang-wasm-wasi.h"
 
-#include "../compiler-core/slang-pretty-writer.h"
-#include "../core/slang-blob.h"
-#include "../core/slang-string-escape-util.h"
-#include "../core/slang-type-text-util.h"
-#include "../slang/slang-profile.h"
+#include "compiler-core/slang-pretty-writer.h"
+#include "core/slang-blob.h"
+#include "core/slang-string-escape-util.h"
+#include "core/slang-type-text-util.h"
+#include "slang/slang-profile.h"
 
 #include <memory>
 #include <slang-com-ptr.h>
