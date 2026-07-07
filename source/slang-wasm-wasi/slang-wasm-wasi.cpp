@@ -35,6 +35,7 @@
 
 using Slang::ComPtr;
 using Slang::Dictionary;
+using Slang::KeyValuePair;
 using Slang::List;
 using Slang::String;
 using Slang::StringBuilder;
@@ -58,7 +59,7 @@ struct WasmTargetList
 // so the PreprocessorMacroDesc::name/value pointers (built lazily) stay valid.
 struct WasmMacroList
 {
-    List<std::pair<String, String>> entries;
+    List<KeyValuePair<String, String>> entries;
 };
 
 // Builder for a search-path list. Owns the path strings for the same reason.
@@ -756,7 +757,7 @@ extern "C" SlangWasmSession slang_wasm_session_create2(
         {
             macroDescs.reserve(macros->entries.getCount());
             for (auto& kv : macros->entries)
-                macroDescs.add({.name = kv.first.getBuffer(), .value = kv.second.getBuffer()});
+                macroDescs.add({.name = kv.key.getBuffer(), .value = kv.value.getBuffer()});
         }
 
         List<const char*> pathPtrs;
@@ -1409,8 +1410,14 @@ extern "C" SlangWasmResult slang_wasm_compile(
             return resultHandle;
 
         // Step 3: composite, link, get code, reflect.
-        slang::IComponentType* components[] = {module, entryPoint.get()};
-        linkCompileAndReflect(session, components, 2, targetIndex, false, result);
+        List<slang::IComponentType*> components(module, entryPoint.get());
+        linkCompileAndReflect(
+            session,
+            components.getBuffer(),
+            static_cast<SlangInt>(components.getCount()),
+            targetIndex,
+            false,
+            result);
         return resultHandle;
     }
     catch (...)
