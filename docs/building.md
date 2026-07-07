@@ -148,11 +148,14 @@ ABI. It can be loaded by any WASI-compatible WebAssembly runtime.
 set `WASI_SDK_PATH` to the unpacked directory:
 
 ```bash
-# Example for macOS arm64 — adjust the filename for your platform.
+# Example for macOS arm64 — adjust the filename for your platform. The
+# archive extracts to a directory named after its own filename stem (e.g.
+# wasi-sdk-33.0-x86_64-linux for Linux x86_64), not a bare "wasi-sdk-33" —
+# make sure WASI_SDK_PATH matches whichever archive you downloaded.
 curl -L -o /tmp/wasi-sdk.tar.gz \
   https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-33/wasi-sdk-33.0-arm64-macos.tar.gz
 tar xf /tmp/wasi-sdk.tar.gz -C /opt
-export WASI_SDK_PATH=/opt/wasi-sdk-33
+export WASI_SDK_PATH=/opt/wasi-sdk-33.0-arm64-macos
 ```
 
 Build sequence (same cross-compiling pattern as Emscripten — native generators
