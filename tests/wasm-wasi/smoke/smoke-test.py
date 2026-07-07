@@ -320,6 +320,44 @@ def test_handle_robustness(abi: Abi, metadata: dict) -> None:
     abi.call("slang_wasm_result_destroy", specialized_result)
     abi.free(entry_ptr)
 
+    # slang_wasm_compile, slang_wasm_compile_entry_point, and slang_wasm_compile_module
+    # share the same getHandle+SLANG_RELEASE_ASSERT-inside-try shape as the exports
+    # above; an unknown session/module handle must land in the same catch block
+    # ("compilation aborted") rather than trap. bogus_module works as a stand-in
+    # for an unknown session handle too: it is not a valid key in either table.
+    compile_result = abi.call("slang_wasm_compile", bogus_module, 0, 0, 0, 0, 0, 0, 0)
+    compile_succeeded, _, compile_diag = read_result(abi, compile_result)
+    check(not compile_succeeded, "slang_wasm_compile(unknown session) unexpectedly succeeded")
+    check(
+        "compilation aborted" in compile_diag,
+        f"slang_wasm_compile diagnostics missing 'compilation aborted': {compile_diag!r}",
+    )
+    abi.call("slang_wasm_result_destroy", compile_result)
+
+    entry_point_result = abi.call("slang_wasm_compile_entry_point", bogus_module, 0, 0, 0, 0)
+    entry_point_succeeded, _, entry_point_diag = read_result(abi, entry_point_result)
+    check(
+        not entry_point_succeeded,
+        "slang_wasm_compile_entry_point(unknown module) unexpectedly succeeded",
+    )
+    check(
+        "compilation aborted" in entry_point_diag,
+        f"slang_wasm_compile_entry_point diagnostics missing 'compilation aborted': {entry_point_diag!r}",
+    )
+    abi.call("slang_wasm_result_destroy", entry_point_result)
+
+    compile_module_result = abi.call("slang_wasm_compile_module", bogus_module, 0, 0)
+    compile_module_succeeded, _, compile_module_diag = read_result(abi, compile_module_result)
+    check(
+        not compile_module_succeeded,
+        "slang_wasm_compile_module(unknown module) unexpectedly succeeded",
+    )
+    check(
+        "compilation aborted" in compile_module_diag,
+        f"slang_wasm_compile_module diagnostics missing 'compilation aborted': {compile_module_diag!r}",
+    )
+    abi.call("slang_wasm_result_destroy", compile_module_result)
+
     # slang_wasm_session_create2 requires at least one target; both an empty
     # (freshly created, unpopulated) target list and a bare 0 handle must
     # return 0 rather than crash.
