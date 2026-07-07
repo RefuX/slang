@@ -428,13 +428,44 @@ def test_null_argument_defense(abi: Abi, metadata: dict) -> None:
     print("null argument defense: (nullptr, len>0) name treated as empty string: OK")
 
 
-def test_enum_resolvers(abi: Abi, metadata: dict) -> None:
-    spirv_ptr, spirv_len = abi.alloc(b"spirv")
+def _check_from_string(abi: Abi, export_name: str, name: str, expected: int) -> None:
+    ptr, length = abi.alloc(name.encode())
+    resolved = abi.call(export_name, ptr, length)
+    abi.free(ptr)
     check(
-        abi.call("slang_wasm_target_from_string", spirv_ptr, spirv_len) == metadata["Target"]["SPIRV"],
-        "target_from_string('spirv') mismatch",
+        resolved == expected,
+        f"{export_name}({name!r}) = {resolved}, expected {expected}",
     )
-    abi.free(spirv_ptr)
+
+
+def test_enum_resolvers(abi: Abi, metadata: dict) -> None:
+    """Cross-check every well-known name against the accepted spellings in
+    TypeTextUtil::findCompileTargetFromName / findStageByName (see
+    source/core/slang-type-text-util.cpp's s_compileTargetInfos and
+    source/slang/slang-profile-defs.h's PROFILE_STAGE entries), not just one
+    enumerator each: the metadata blob's whole purpose is to keep those two
+    independently maintained tables in lockstep with the generated JSON, so a
+    mismatch on any other entry is exactly the kind of bug this test exists
+    to catch.
+    """
+    target_names = {
+        "spirv": "SPIRV",
+        "hlsl": "HLSL",
+        "glsl": "GLSL",
+        "dxil": "DXIL",
+        "metal": "METAL",
+        "wgsl": "WGSL",
+        "cuda": "CUDA_SOURCE",
+        "cpp": "CPP_SOURCE",
+        "ptx": "PTX",
+        "host-callable": "SHADER_HOST_CALLABLE",
+        "executable": "HOST_EXECUTABLE",
+        "sharedlibrary": "HOST_SHARED_LIBRARY",
+        "object-code": "OBJECT_CODE",
+        "none": "TARGET_NONE",
+    }
+    for name, key in target_names.items():
+        _check_from_string(abi, "slang_wasm_target_from_string", name, metadata["Target"][key])
 
     bogus_ptr, bogus_len = abi.alloc(b"not-a-real-target")
     check(
@@ -443,12 +474,26 @@ def test_enum_resolvers(abi: Abi, metadata: dict) -> None:
     )
     abi.free(bogus_ptr)
 
-    compute_ptr, compute_len = abi.alloc(b"compute")
-    check(
-        abi.call("slang_wasm_stage_from_string", compute_ptr, compute_len) == metadata["Stage"]["COMPUTE"],
-        "stage_from_string('compute') mismatch",
-    )
-    abi.free(compute_ptr)
+    stage_names = {
+        "vertex": "VERTEX",
+        "hull": "HULL",
+        "domain": "DOMAIN",
+        "geometry": "GEOMETRY",
+        "pixel": "FRAGMENT",
+        "compute": "COMPUTE",
+        "raygeneration": "RAY_GENERATION",
+        "intersection": "INTERSECTION",
+        "anyhit": "ANY_HIT",
+        "closesthit": "CLOSEST_HIT",
+        "miss": "MISS",
+        "callable": "CALLABLE",
+        "mesh": "MESH",
+        "amplification": "AMPLIFICATION",
+        "dispatch": "DISPATCH",
+        "node": "NODE",
+    }
+    for name, key in stage_names.items():
+        _check_from_string(abi, "slang_wasm_stage_from_string", name, metadata["Stage"][key])
 
     bogus_stage_ptr, bogus_stage_len = abi.alloc(b"not-a-real-stage")
     check(
@@ -456,7 +501,7 @@ def test_enum_resolvers(abi: Abi, metadata: dict) -> None:
         "stage_from_string(bogus) should be -1",
     )
     abi.free(bogus_stage_ptr)
-    print("enum resolvers: OK")
+    print(f"enum resolvers: {len(target_names)} targets + {len(stage_names)} stages cross-checked OK")
 
 
 def test_multi_target_session(abi: Abi, metadata: dict, source: str, entry_name: str) -> None:
