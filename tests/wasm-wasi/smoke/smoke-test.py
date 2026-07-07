@@ -68,6 +68,15 @@ def check(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def call_must_not_trap(abi: Abi, name: str, *args) -> None:
+    """Call a void-returning export, failing with a clear message if it traps
+    instead of treating a bogus handle argument as a safe no-op."""
+    try:
+        abi.call(name, *args)
+    except Exception as e:
+        raise AssertionError(f"{name}{args} unexpectedly trapped: {e}") from e
+
+
 def load_module(abi: Abi, session: int, name: str, source: str) -> tuple[int, str]:
     """Load `source` as `name` into `session`. Returns (module handle, diagnostics text)."""
     name_ptr, name_len = abi.alloc(name.encode("utf-8"))
@@ -322,6 +331,24 @@ def test_handle_robustness(abi: Abi, metadata: dict) -> None:
     check(
         abi.call("slang_wasm_session_create2", 0, 0, 0, 0) == 0,
         "session_create2 with a 0 target list handle should return 0",
+    )
+
+    # Every *_add builder mutator must treat a 0/unknown handle as a no-op
+    # (matching the void/-1 sentinel contract documented in
+    # slang-wasm-wasi.h) rather than letting the handle-validity check escape
+    # as an uncaught exception. (0, 0) is a safe stand-in for every (ptr, len)
+    # string argument here: the null-handle check returns before any argument
+    # is read.
+    call_must_not_trap(abi, "slang_wasm_target_list_add", 0, 0, 0, 0, 0)
+    call_must_not_trap(abi, "slang_wasm_macro_list_add", 0, 0, 0, 0, 0)
+    call_must_not_trap(abi, "slang_wasm_path_list_add", 0, 0, 0)
+    call_must_not_trap(abi, "slang_wasm_options_add_string", 0, 0, 0, 0)
+    call_must_not_trap(abi, "slang_wasm_options_add_int", 0, 0, 0)
+    call_must_not_trap(abi, "slang_wasm_spec_args_add_type", 0, 0, 0)
+    call_must_not_trap(abi, "slang_wasm_spec_args_add_expr", 0, 0, 0)
+    check(
+        abi.call("slang_wasm_type_conformances_add", 0, 0, 0, 0, 0, -1, 0, 0) == -1,
+        "type_conformances_add(0 handle) should return -1",
     )
 
     # The instance must still be fully usable after all of the above.

@@ -580,7 +580,8 @@ extern "C" void slang_wasm_target_list_add(
     uint32_t flags)
 {
     WasmTargetList* list = getHandle(g_runtime.targetLists, listHandle);
-    SLANG_RELEASE_ASSERT(list);
+    if (!list)
+        return;
 
     // ensureGlobalSession()/spFindProfile() can throw; catch it here (no result
     // object exists to report through) and just drop the target.
@@ -632,7 +633,8 @@ extern "C" void slang_wasm_macro_list_add(
     uint32_t valueLen)
 {
     WasmMacroList* list = getHandle(g_runtime.macroLists, listHandle);
-    SLANG_RELEASE_ASSERT(list);
+    if (!list)
+        return;
     try
     {
         list->entries.add({toStr(name, nameLen), toStr(value, valueLen)});
@@ -669,7 +671,8 @@ extern "C" void slang_wasm_path_list_add(
     uint32_t pathLen)
 {
     WasmPathList* list = getHandle(g_runtime.pathLists, listHandle);
-    SLANG_RELEASE_ASSERT(list);
+    if (!list)
+        return;
     try
     {
         list->paths.add(toStr(path, pathLen));
@@ -707,7 +710,8 @@ extern "C" void slang_wasm_options_add_string(
     uint32_t valLen)
 {
     WasmOptions* options = getHandle(g_runtime.optionLists, optsHandle);
-    SLANG_RELEASE_ASSERT(options);
+    if (!options)
+        return;
     try
     {
         WasmOptionEntry entry;
@@ -724,7 +728,8 @@ extern "C" void slang_wasm_options_add_string(
 extern "C" void slang_wasm_options_add_int(SlangWasmOptions optsHandle, uint32_t name, int32_t val)
 {
     WasmOptions* options = getHandle(g_runtime.optionLists, optsHandle);
-    SLANG_RELEASE_ASSERT(options);
+    if (!options)
+        return;
     try
     {
         WasmOptionEntry entry;
@@ -1070,7 +1075,11 @@ extern "C" int32_t slang_wasm_type_conformances_add(
 {
     WasmTypeConformances* wasmConformances =
         getHandle(g_runtime.typeConformancesLists, conformancesHandle);
-    SLANG_RELEASE_ASSERT(wasmConformances);
+    if (!wasmConformances)
+    {
+        writeDiagOut(nullptr, diagPtrOut, diagLenOut);
+        return -1;
+    }
     try
     {
         StringBuilder diagnostics;
@@ -1171,7 +1180,8 @@ extern "C" void slang_wasm_spec_args_add_type(
     uint32_t typeNameLen)
 {
     WasmSpecArgs* args = getHandle(g_runtime.specArgsLists, argsHandle);
-    SLANG_RELEASE_ASSERT(args);
+    if (!args)
+        return;
     try
     {
         args->entries.add(
@@ -1189,7 +1199,8 @@ extern "C" void slang_wasm_spec_args_add_expr(
     uint32_t exprLen)
 {
     WasmSpecArgs* args = getHandle(g_runtime.specArgsLists, argsHandle);
-    SLANG_RELEASE_ASSERT(args);
+    if (!args)
+        return;
     try
     {
         args->entries.add(
